@@ -1,6 +1,9 @@
+#![forbid(unsafe_code)]
+
 use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -16,10 +19,10 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-use crate::dsp::{DspParams, StudioDspChain};
+use crate::dsp::{BiquadCoeffs, DspParams, FilterKind, StudioDspChain};
 
 /// Cache multi-risoluzione (Peak + RMS) per disegnare forme d'onda fluide a 60 FPS stile DAW moderna.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WaveformMipmap {
     pub block_size: usize,
     pub min_val: Vec<f32>,
@@ -30,14 +33,15 @@ pub struct WaveformMipmap {
 impl WaveformMipmap {
     pub fn build(left: &[f32], right: &[f32], block_size: usize) -> Self {
         let len = left.len().min(right.len());
-        let n_blocks = (len + block_size - 1) / block_size.max(1);
+        let step = block_size.max(1);
+        let n_blocks = (len + step - 1) / step;
         let mut min_val = Vec::with_capacity(n_blocks);
         let mut max_val = Vec::with_capacity(n_blocks);
         let mut rms_val = Vec::with_capacity(n_blocks);
 
         for b in 0..n_blocks {
-            let start = b * block_size;
-            let end = (start + block_size).min(len);
+            let start = b * step;
+            let end = (start + step).min(len);
             let mut mn = 0.0_f32;
             let mut mx = 0.0_f32;
             let mut sq = 0.0_f32;
@@ -58,7 +62,7 @@ impl WaveformMipmap {
         }
 
         Self {
-            block_size,
+            block_size: step,
             min_val,
             max_val,
             rms_val,
@@ -66,61 +70,148 @@ impl WaveformMipmap {
     }
 }
 
-#[derive(Clone)]
+/// Buffer audio stereo zero-copy basato su `Arc`: `StereoBuffer::clone()` è O(1) istantaneo!
+#[derive(Clone, Debug)]
 pub struct StereoBuffer {
-    pub left: Vec<f32>,
-    pub right: Vec<f32>,
+    pub left: Arc<Vec<f32>>,
+    pub right: Arc<Vec<f32>>,
     pub sample_rate: u32,
-    pub mip_fine: WaveformMipmap,   // 128 samples/block (zoom ravvicinato)
-    pub mip_coarse: WaveformMipmap, // 2048 samples/block (vista intero brano)
+    pub mip_fine: Arc<WaveformMipmap>,   // 128 samples/block (zoom ravvicinato)
+    pub mip_coarse: Arc<WaveformMipmap>, // 2048 samples/block (vista intero brano)
+}
+
+#[inline]
+fn hermite4_interp(src: &[f32], src_pos: f64) -> f32 {
+    if src.is_empty() {
+        return 0.0;
+    }
+    let max_idx = src.len() - 1;
+    let idx0 = (src_pos.floor() as isize).clamp(0, max_idx as isize) as usize;
+    let frac = (src_pos - idx0 as f64).clamp(0.0, 1.0) as f32;
+
+    let im1 = idx0.saturating_sub(1);
+    let i1 = (idx0 + 1).min(max_idx);
+    let i2 = (idx0 + 2).min(max_idx);
+
+    let xm1 = src[im1];
+    let x0 = src[idx0];
+    let x1 = src[i1];
+    let x2 = src[i2];
+
+    let c0 = x0;
+    let c1 = 0.5_f32 * (x1 - xm1);
+    let c2 = xm1 - 2.5_f32 * x0 + 2.0_f32 * x1 - 0.5_f32 * x2;
+    let c3 = 0.5_f32 * (x2 - xm1) + 1.5_f32 * (x0 - x1);
+
+    ((c3 * frac + c2) * frac + c1) * frac + c0
+}
+
+fn prefilter_zero_phase_lowpass(samples: &[f32], cutoff_hz: f64, sr_hz: f64) -> Vec<f32> {
+    if samples.len() < 4 {
+        return samples.to_vec();
+    }
+    let coeffs = BiquadCoeffs::design(
+        FilterKind::LowPass,
+        cutoff_hz,
+        sr_hz,
+        0.0,
+        std::f64::consts::FRAC_1_SQRT_2,
+    );
+
+    let mut out: Vec<f32> = samples.to_vec();
+    // Doppio stadio forward-backward (48 dB/oct Linkwitz-Riley a fase lineare, zero ritardo di gruppo)
+    for _stage in 0..2 {
+        let mut z1 = 0.0_f64;
+        let mut z2 = 0.0_f64;
+        for s in out.iter_mut() {
+            let x = *s as f64;
+            let y = coeffs.b0 * x + z1;
+            z1 = coeffs.b1 * x - coeffs.a1 * y + z2;
+            z2 = coeffs.b2 * x - coeffs.a2 * y;
+            *s = y as f32;
+        }
+
+        z1 = 0.0_f64;
+        z2 = 0.0_f64;
+        for s in out.iter_mut().rev() {
+            let x = *s as f64;
+            let y = coeffs.b0 * x + z1;
+            z1 = coeffs.b1 * x - coeffs.a1 * y + z2;
+            z2 = coeffs.b2 * x - coeffs.a2 * y;
+            *s = y as f32;
+        }
+    }
+
+    out
 }
 
 impl StereoBuffer {
     pub fn from_vecs(left: Vec<f32>, right: Vec<f32>, sample_rate: u32) -> Self {
-        let mip_fine = WaveformMipmap::build(&left, &right, 128);
-        let mip_coarse = WaveformMipmap::build(&left, &right, 2048);
+        let mip_fine = Arc::new(WaveformMipmap::build(&left, &right, 128));
+        let mip_coarse = Arc::new(WaveformMipmap::build(&left, &right, 2048));
         Self {
-            left,
-            right,
+            left: Arc::new(left),
+            right: Arc::new(right),
             sample_rate,
             mip_fine,
             mip_coarse,
         }
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.left.len().min(self.right.len())
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Ricampionamento studio con interpolazione cubica Hermite a 4 punti
+    /// e pre-filtro biquad anti-aliasing a fase zero in caso di downsampling (`ratio > 1.01`).
     pub fn resample_to(&self, target_sr: u32) -> Self {
-        if self.sample_rate == target_sr || self.len() < 2 {
+        let safe_target_sr = target_sr.max(8_000);
+        if self.sample_rate == safe_target_sr || self.len() < 2 {
             return self.clone();
         }
-        let ratio = self.sample_rate as f64 / target_sr as f64;
-        let out_len = ((self.len() as f64) / ratio) as usize;
+        let ratio = self.sample_rate as f64 / safe_target_sr as f64;
+        let out_len = ((self.len() as f64) / ratio).round().max(1.0) as usize;
+
+        let filtered_pair = if ratio > 1.01 {
+            let cutoff = 0.45 * (safe_target_sr as f64);
+            let sr = self.sample_rate as f64;
+            let fl = prefilter_zero_phase_lowpass(&self.left[..self.len()], cutoff, sr);
+            let fr = prefilter_zero_phase_lowpass(&self.right[..self.len()], cutoff, sr);
+            Some((fl, fr))
+        } else {
+            None
+        };
+
+        let (src_l, src_r): (&[f32], &[f32]) = match filtered_pair {
+            Some((ref fl, ref fr)) => (fl.as_slice(), fr.as_slice()),
+            None => (&self.left[..self.len()], &self.right[..self.len()]),
+        };
+
         let mut out_l = Vec::with_capacity(out_len);
         let mut out_r = Vec::with_capacity(out_len);
-        let max_idx = self.len() - 1;
 
         for i in 0..out_len {
             let src_pos = i as f64 * ratio;
-            let idx0 = (src_pos.floor() as usize).min(max_idx);
-            let idx1 = (idx0 + 1).min(max_idx);
-            let frac = (src_pos - idx0 as f64) as f32;
-            out_l.push(self.left[idx0] * (1.0 - frac) + self.left[idx1] * frac);
-            out_r.push(self.right[idx0] * (1.0 - frac) + self.right[idx1] * frac);
+            out_l.push(hermite4_interp(src_l, src_pos));
+            out_r.push(hermite4_interp(src_r, src_pos));
         }
 
-        Self::from_vecs(out_l, out_r, target_sr)
+        Self::from_vecs(out_l, out_r, safe_target_sr)
     }
 
     /// Campiona istantaneamente (min, max, rms) nell'intervallo [f0..f1] per una colonna pixel.
     pub fn sample_envelope(&self, f0: usize, f1: usize) -> (f32, f32, f32) {
         let span = f1.saturating_sub(f0).max(1);
         let mip = if span >= 2048 {
-            &self.mip_coarse
+            &*self.mip_coarse
         } else {
-            &self.mip_fine
+            &*self.mip_fine
         };
         if mip.max_val.is_empty() {
             return (0.0, 0.0, 0.0);
@@ -143,6 +234,146 @@ impl StereoBuffer {
     }
 }
 
+/// Legge di pan a potenza costante normalizzata: `pan == 0.0` produce guadagno unitario `(1.0, 1.0)`
+/// identico tra riproduzione Live WASAPI, Export Mix Master ed Export 4 Stems WAV!
+#[inline]
+pub fn constant_power_pan_gains(pan: f32) -> (f32, f32) {
+    let angle = (pan.clamp(-1.0_f32, 1.0_f32) + 1.0_f32) * std::f32::consts::FRAC_PI_4;
+    (
+        angle.cos() * std::f32::consts::SQRT_2,
+        angle.sin() * std::f32::consts::SQRT_2,
+    )
+}
+
+/// Soft-limiter analogico trasparente a ginocchio morbido prima della conversione PCM 24-bit
+/// per evitare qualsiasi clipping digitale secco durante l'esportazione.
+#[inline]
+pub fn soft_limit_to_pcm24(sample: f32) -> i32 {
+    const SCALE_24BIT: f32 = 8_388_607.0_f32;
+    const KNEE: f32 = 0.94_f32;
+    const CEIL: f32 = 0.9999_f32;
+
+    if !sample.is_finite() {
+        return 0;
+    }
+
+    let ax = sample.abs();
+    let shaped = if ax > KNEE {
+        let span = CEIL - KNEE;
+        KNEE + span * ((ax - KNEE) / span).tanh()
+    } else {
+        ax
+    };
+    let clamped = (sample.signum() * shaped).clamp(-1.0_f32, 1.0_f32);
+    (clamped * SCALE_24BIT).round() as i32
+}
+
+fn collect_ffmpeg_bins_recursive(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 4 || !dir.is_dir() {
+        return;
+    }
+    let ffmpeg_exe = if cfg!(target_os = "windows") {
+        dir.join("ffmpeg.exe")
+    } else {
+        dir.join("ffmpeg")
+    };
+    if ffmpeg_exe.is_file() {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_ffmpeg_bins_recursive(&p, depth + 1, out);
+            }
+        }
+    }
+}
+
+/// Raccoglie le directory FFmpeg installate tramite WinGet (`Links` e `Packages\*FFmpeg*\**\bin`)
+/// così FFmpeg funziona immediatamente anche senza riavviare Windows Explorer.
+pub fn discover_winget_ffmpeg_dirs() -> Vec<PathBuf> {
+    let mut extra_dirs = Vec::new();
+
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let base = PathBuf::from(local_app_data).join("Microsoft").join("WinGet");
+        let links = base.join("Links");
+        if links.is_dir() {
+            extra_dirs.push(links);
+        }
+
+        let packages = base.join("Packages");
+        if let Ok(entries) = std::fs::read_dir(packages) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let name_upper = entry.file_name().to_string_lossy().to_uppercase();
+                    if name_upper.contains("FFMPEG") {
+                        collect_ffmpeg_bins_recursive(&p, 0, &mut extra_dirs);
+                    }
+                }
+            }
+        }
+    }
+
+    for fallback in [r"C:\ffmpeg\bin", r"C:\Program Files\ffmpeg\bin"] {
+        let p = Path::new(fallback);
+        if p.is_dir() {
+            extra_dirs.push(p.to_path_buf());
+        }
+    }
+
+    extra_dirs
+}
+
+/// Costruisce la variabile `PATH` arricchita con i percorsi WinGet FFmpeg per i processi figli.
+pub fn build_augmented_path_env() -> Option<OsString> {
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|val| std::env::split_paths(&val).collect())
+        .unwrap_or_default();
+
+    for extra in discover_winget_ffmpeg_dirs() {
+        let already = paths.iter().any(|existing| {
+            existing
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&extra.to_string_lossy())
+        });
+        if !already {
+            paths.push(extra);
+        }
+    }
+
+    std::env::join_paths(paths).ok()
+}
+
+/// Risolve il percorso dell'eseguibile `ffmpeg` (cercando anche nelle cartelle WinGet).
+pub fn resolve_ffmpeg_executable() -> PathBuf {
+    let bin_name = if cfg!(target_os = "windows") {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+
+    if let Some(path_os) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_os) {
+            let candidate = dir.join(bin_name);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+
+    for dir in discover_winget_ffmpeg_dirs() {
+        let candidate = dir.join(bin_name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    PathBuf::from("ffmpeg")
+}
+
 pub fn decode_audio_file(path: &Path) -> Result<StereoBuffer, String> {
     let probe_once = |use_ext: bool| -> Result<symphonia::core::probe::ProbeResult, String> {
         let file = File::open(path).map_err(|e| format!("Impossibile aprire il file: {e}"))?;
@@ -150,12 +381,21 @@ pub fn decode_audio_file(path: &Path) -> Result<StereoBuffer, String> {
         let mut hint = Hint::new();
         if use_ext {
             if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                let mapped = if ext.eq_ignore_ascii_case("mpeg") { "mp3" } else { ext };
+                let mapped = if ext.eq_ignore_ascii_case("mpeg") {
+                    "mp3"
+                } else {
+                    ext
+                };
                 hint.with_extension(mapped);
             }
         }
         symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(|e| format!("Formato audio non riconosciuto: {e}"))
     };
 
@@ -350,13 +590,6 @@ impl SharedAudioState {
     }
 }
 
-#[inline]
-fn pan_gains(pan: f32) -> (f32, f32) {
-    // Constant-power pan law
-    let angle = (pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
-    (angle.cos(), angle.sin())
-}
-
 pub struct RealtimeAudioEngine {
     _stream: cpal::Stream,
     pub state: Arc<Mutex<SharedAudioState>>,
@@ -424,8 +657,8 @@ impl RealtimeAudioEngine {
                         } else {
                             0.0
                         };
-                        let (pl, pr) = pan_gains(ch.pan);
-                        (g, pl * std::f32::consts::SQRT_2 * 0.7071, pr * std::f32::consts::SQRT_2 * 0.7071)
+                        let (pl, pr) = constant_power_pan_gains(ch.pan);
+                        (g, pl, pr)
                     });
 
                     let mut max_l = 0.0_f32;
@@ -466,15 +699,19 @@ impl RealtimeAudioEngine {
                                     let mut sl = 0.0_f32;
                                     let mut sr_val = 0.0_f32;
                                     for i in 0..4 {
+                                        if stems[i].is_empty() {
+                                            continue;
+                                        }
                                         let idx = pos.min(stems[i].len() - 1);
                                         let (g, pl, pr) = stem_cfg[i];
                                         let l_s = stems[i].left[idx] * g * pl;
                                         let r_s = stems[i].right[idx] * g * pr;
-                                        stem_peaks[i] = stem_peaks[i].max(l_s.abs().max(r_s.abs()));
+                                        stem_peaks[i] =
+                                            stem_peaks[i].max(l_s.abs().max(r_s.abs()));
                                         sl += l_s;
                                         sr_val += r_s;
                                     }
-                                    // Passa anche attraverso il Master EQ live (in Flat di default sui 4 stems, o personalizzabile!)
+                                    // Passa anche attraverso il Master EQ live (parità 100% con export_session)
                                     dsp.process_frame(sl * 0.82, sr_val * 0.82, &st.params)
                                 } else {
                                     (0.0, 0.0)
@@ -555,14 +792,14 @@ pub fn export_session(
     let sr = main_track
         .map(|b| b.sample_rate)
         .or_else(|| stems.map(|s| s[0].sample_rate))
+        .or_else(|| ai_master.map(|b| b.sample_rate))
         .unwrap_or(44100);
 
     let len = match mode {
         PlaybackSourceMode::FourStemMixer => stems.map(|s| s[0].len()).unwrap_or(0),
-        PlaybackSourceMode::PreRenderedAiMaster => ai_master
-            .or(main_track)
-            .map(|b| b.len())
-            .unwrap_or(0),
+        PlaybackSourceMode::PreRenderedAiMaster => {
+            ai_master.or(main_track).map(|b| b.len()).unwrap_or(0)
+        }
         PlaybackSourceMode::OriginalWithLiveDsp => main_track.map(|b| b.len()).unwrap_or(0),
     };
 
@@ -580,7 +817,7 @@ pub fn export_session(
         } else {
             0.0
         };
-        let (pl, pr) = pan_gains(ch.pan);
+        let (pl, pr) = constant_power_pan_gains(ch.pan);
         (g, pl, pr)
     });
 
@@ -606,7 +843,6 @@ pub fn export_session(
     let mut writer = hound::WavWriter::create(&wav_target, spec)
         .map_err(|e| format!("Impossibile creare file WAV: {e}"))?;
 
-    let scale_24 = 8_388_607.0_f32;
     for i in 0..len {
         let (in_l, in_r) = match mode {
             PlaybackSourceMode::FourStemMixer => {
@@ -614,6 +850,9 @@ pub fn export_session(
                     let mut sl = 0.0_f32;
                     let mut sr_v = 0.0_f32;
                     for k in 0..4 {
+                        if st_arr[k].is_empty() {
+                            continue;
+                        }
                         let idx = i.min(st_arr[k].len() - 1);
                         let (g, pl, pr) = stem_cfg[k];
                         sl += st_arr[k].left[idx] * g * pl;
@@ -643,15 +882,19 @@ pub fn export_session(
         };
 
         let (l, r) = dsp.process_frame(in_l, in_r, params);
-        let il = (l.clamp(-1.0, 1.0) * scale_24) as i32;
-        let ir = (r.clamp(-1.0, 1.0) * scale_24) as i32;
+        let il = soft_limit_to_pcm24(l);
+        let ir = soft_limit_to_pcm24(r);
         writer.write_sample(il).map_err(|e| e.to_string())?;
         writer.write_sample(ir).map_err(|e| e.to_string())?;
     }
     writer.finalize().map_err(|e| e.to_string())?;
 
     if is_mp3 {
-        let mut cmd = Command::new("ffmpeg");
+        let ffmpeg_bin = resolve_ffmpeg_executable();
+        let mut cmd = Command::new(ffmpeg_bin);
+        if let Some(aug_path) = build_augmented_path_env() {
+            cmd.env("PATH", aug_path);
+        }
         cmd.args([
             "-nostdin",
             "-y",
@@ -684,4 +927,47 @@ pub fn export_session(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_arc_stereo_buffer_clone_and_pan_parity() {
+        let buf = StereoBuffer::from_vecs(vec![0.25; 4096], vec![-0.25; 4096], 48_000);
+        let cloned = buf.clone();
+        assert!(Arc::ptr_eq(&buf.left, &cloned.left));
+        assert!(Arc::ptr_eq(&buf.right, &cloned.right));
+        assert!(Arc::ptr_eq(&buf.mip_fine, &cloned.mip_fine));
+
+        let (pl, pr) = constant_power_pan_gains(0.0);
+        assert!((pl - 1.0).abs() < 1e-5, "Center pan L gain was {pl}");
+        assert!((pr - 1.0).abs() < 1e-5, "Center pan R gain was {pr}");
+    }
+
+    #[test]
+    fn test_hermite_resample_up_and_down() {
+        let sr_in = 48_000u32;
+        let len_in = 4_800usize; // 100 ms
+        let mut l = Vec::with_capacity(len_in);
+        let mut r = Vec::with_capacity(len_in);
+        for i in 0..len_in {
+            let t = i as f32 / sr_in as f32;
+            let s = 0.7 * (2.0 * std::f32::consts::PI * 440.0 * t).sin();
+            l.push(s);
+            r.push(-s);
+        }
+        let buf = StereoBuffer::from_vecs(l, r, sr_in);
+
+        let down = buf.resample_to(44_100);
+        assert_eq!(down.sample_rate, 44_100);
+        assert_eq!(down.len(), 4_410);
+        assert!(down.left.iter().all(|x| x.is_finite() && x.abs() <= 0.75));
+
+        let up = down.resample_to(48_000);
+        assert_eq!(up.sample_rate, 48_000);
+        assert_eq!(up.len(), 4_800);
+        assert!(up.right.iter().all(|x| x.is_finite() && x.abs() <= 0.75));
+    }
 }

@@ -1,20 +1,31 @@
-# Rust build artifacts
+# Rust build artifacts (including local llvm-shims)
 studio-eq-rust/target/
 target/
 
-# Python virtual environments & cache
+# Python virtual environments, bytecode & pytest caches
 .venv/
+**/__pycache__/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+**/.pytest_cache/
 
-# Large raw / uncompressed audio renders (>50MB WAVs)
-output/*.wav
-output/stems_raw/
-output/stems_studio/*.wav
-
-output/*.mp3
-output/stems_studio/*.mp3
+# Generated audio outputs, pipeline JSON reports & temporary test renders/screenshots
+output/
+output/ai_pipeline_options.json
 output/ai_master_report.json
+**/ai_pipeline_options.json
+**/ai_master_report.json
+_esempi/
+work/
+*.temp_render.wav
+*.bmp
+
+# Distribution / installer staging packages
 dist/
 *.dmg
 
+# Explicitly keep distributed root executable, studio drum samples & Python test suites tracked
+!StudioEQ_Master_Pro.exe
+!assets/drum_samples/*.wav
+!tests/*.py

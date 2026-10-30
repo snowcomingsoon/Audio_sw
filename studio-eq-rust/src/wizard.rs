@@ -161,16 +161,102 @@ impl MasterPushMode {
     }
 }
 
-/// Snapshot immutabile delle scelte effettuate nel Wizard guidato (riutilizzabile anche a fine separazione AI).
+/// Correzione d'intonazione vocale AI (Passo 3 Studio AI).
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoTuneMode {
+    Off,
+    Naturale,
+    Moderno,
+}
+
+impl AutoTuneMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Spento (Off)",
+            Self::Naturale => "Naturale",
+            Self::Moderno => "Moderno",
+        }
+    }
+
+    pub fn as_json_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Naturale => "natural",
+            Self::Moderno => "modern",
+        }
+    }
+}
+
+/// Rinforzo Cassa & Rullante con campioni Studio anti-suono pastoso (Passo 3 Studio AI).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrumSampleMode {
+    Off,
+    Naturale,
+    StudioPunch,
+}
+
+impl DrumSampleMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Spento (Off)",
+            Self::Naturale => "Naturale (Consigliato)",
+            Self::StudioPunch => "Studio Punch",
+        }
+    }
+
+    pub fn as_json_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Naturale => "natural",
+            Self::StudioPunch => "punch",
+        }
+    }
+}
+
+/// Ricampionamento Basso con Sub pulito e Sidechain sulla Cassa (Passo 3 Studio AI).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BassEnhanceMode {
+    Off,
+    Naturale,
+    StudioReAmp,
+}
+
+impl BassEnhanceMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Spento (Off)",
+            Self::Naturale => "Naturale (Consigliato)",
+            Self::StudioReAmp => "Studio Re-Amp",
+        }
+    }
+
+    pub fn as_json_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Naturale => "natural",
+            Self::StudioReAmp => "reamp",
+        }
+    }
+}
+
+/// Snapshot immutabile delle scelte effettuate nel Wizard guidato (riutilizzabile anche a fine separazione AI).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GuidedWizardChoices {
     pub split_stems_ai: bool,
     pub source_profile: SourceProfile,
-    pub bass_mode: BassBoostMode,
+    pub bass_boost: BassBoostMode,
     pub vocal_clarity: VocalClarityMode,
     pub air_brilliance: AirMode,
     pub master_push: MasterPushMode,
+    pub autotune_mode: AutoTuneMode,
+    pub drum_mode: DrumSampleMode,
+    pub bass_mode: BassEnhanceMode,
+    pub target_bpm: Option<f32>,
+    pub force_reseparate: bool,
 }
 
 impl Default for GuidedWizardChoices {
@@ -178,10 +264,15 @@ impl Default for GuidedWizardChoices {
         Self {
             split_stems_ai: true,
             source_profile: SourceProfile::SalaProveLive,
-            bass_mode: BassBoostMode::BassBoostPunch,
+            bass_boost: BassBoostMode::BassBoostPunch,
             vocal_clarity: VocalClarityMode::PrimoPiano,
             air_brilliance: AirMode::CristallinaStudio,
             master_push: MasterPushMode::StreamingPotente,
+            autotune_mode: AutoTuneMode::Off,
+            drum_mode: DrumSampleMode::Naturale,
+            bass_mode: BassEnhanceMode::Naturale,
+            target_bpm: None,
+            force_reseparate: false,
         }
     }
 }
@@ -213,7 +304,7 @@ impl GuidedWizardChoices {
             VocalClarityMode::ExtraNitida => 3.0_f32,
         };
 
-        let (drums_db, bass_db) = match self.bass_mode {
+        let (drums_db, bass_db) = match self.bass_boost {
             BassBoostMode::AntiRimbombo => (0.0_f32, -1.0_f32),
             BassBoostMode::Bilanciato => (0.0_f32, 0.0_f32),
             BassBoostMode::BassBoostPunch => (1.5_f32, 3.5_f32),
@@ -231,7 +322,7 @@ impl GuidedWizardChoices {
     /// Restituisce le 4 percentuali `(0..=100)` per sincronizzare le manopole Smart dell'EQ Drawer:
     /// `[macro_clean, macro_vocal, macro_air, macro_punch]`.
     pub fn macro_knobs_pct(&self) -> [f32; 4] {
-        let clean = match self.bass_mode {
+        let clean = match self.bass_boost {
             BassBoostMode::AntiRimbombo => 85.0_f32,
             BassBoostMode::Bilanciato => 55.0_f32,
             BassBoostMode::BassBoostPunch => 35.0_f32,
@@ -311,7 +402,7 @@ impl GuidedWizardChoices {
         // =====================================================================
         // 1. BASS BOOST & CONTROLLO BASSE FREQUENZE (Zero-Clipping & Anti-Mud)
         // =====================================================================
-        match self.bass_mode {
+        match self.bass_boost {
             BassBoostMode::AntiRimbombo => {
                 p.sub_cut_hz = if is_for_stems { 54.0 } else { 62.0 };
 
@@ -582,7 +673,7 @@ impl GuidedWizardChoices {
         };
 
         // Compensazione intelligente di headroom sul Bus Compressor per preservare punch e 0% distorsione
-        let bass_headroom_trim: f64 = match self.bass_mode {
+        let bass_headroom_trim: f64 = match self.bass_boost {
             BassBoostMode::MegaSubBoost => -0.8_f64,
             BassBoostMode::BassBoostPunch => -0.3_f64,
             _ => 0.0_f64,
@@ -590,7 +681,7 @@ impl GuidedWizardChoices {
 
         p.comp_drive_db = (base_drive_db + bass_headroom_trim).clamp(0.4_f64, 8.5_f64);
         p.stereo_width = width;
-        p.ceiling_db = if self.bass_mode == BassBoostMode::MegaSubBoost {
+        p.ceiling_db = if self.bass_boost == BassBoostMode::MegaSubBoost {
             -0.5
         } else {
             -0.4
@@ -604,25 +695,30 @@ impl GuidedWizardChoices {
         self.apply_choices_to_params(DspParams::preset_stem_polish(), true)
     }
 
-    /// Frase di riepilogo chiara per la barra di stato e per il Passo 3 del Wizard.
+    /// Frase di riepilogo chiara per la barra di stato e per il Passo finale del Wizard.
     pub fn summary_line(&self) -> String {
         let mode_str = if self.split_stems_ai {
-            "Separazione AI in 4 tracce"
+            "Separazione AI 4 tracce"
         } else {
-            "Applicazione istantanea su traccia singola"
+            "Traccia singola live"
         };
-        let bass_str = match self.bass_mode {
-            BassBoostMode::AntiRimbombo => "Bassi Asciutti Anti-Rimbombo",
+        let bass_str = match self.bass_boost {
+            BassBoostMode::AntiRimbombo => "Bassi Asciutti",
             BassBoostMode::Bilanciato => "Bassi Bilanciati",
-            BassBoostMode::BassBoostPunch => "Bass Boost (+Punch & Corpo)",
-            BassBoostMode::MegaSubBoost => "Mega Sub Boost (+Bassi Profondi)",
+            BassBoostMode::BassBoostPunch => "Bass Boost Punch",
+            BassBoostMode::MegaSubBoost => "Mega Sub Boost",
+        };
+        let bpm_str = match self.target_bpm {
+            Some(b) => format!("{b:.1} BPM"),
+            None => "BPM Originale".to_string(),
         };
         format!(
-            "{}  •  {}  •  {}  •  {}",
+            "{}  •  {}  •  Auto-Tune {}  •  Batteria {}  •  {}",
             mode_str,
-            self.source_profile.label(),
             bass_str,
-            self.vocal_clarity.label()
+            self.autotune_mode.label(),
+            self.drum_mode.label(),
+            bpm_str
         )
     }
 
@@ -643,7 +739,7 @@ impl GuidedWizardChoices {
     }
 }
 
-/// Stato completo della finestra modale guidata a 3 passi mostrata all'apertura di una traccia.
+/// Stato completo della finestra modale guidata a 4 passi mostrata all'apertura di una traccia.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct GuidedWizardState {
@@ -652,10 +748,17 @@ pub struct GuidedWizardState {
     pub track_name: String,
     pub split_stems_ai: bool,
     pub source_profile: SourceProfile,
-    pub bass_mode: BassBoostMode,
+    pub bass_boost: BassBoostMode,
     pub vocal_clarity: VocalClarityMode,
     pub air_brilliance: AirMode,
     pub master_push: MasterPushMode,
+    pub autotune_mode: AutoTuneMode,
+    pub drum_mode: DrumSampleMode,
+    pub bass_mode: BassEnhanceMode,
+    pub detected_bpm: f32,
+    pub custom_bpm_enabled: bool,
+    pub custom_bpm_value: f32,
+    pub force_reseparate: bool,
     /// Ultima configurazione confermata dall'utente (usata per ri-applicare Bass Boost e guadagni
     /// quando la separazione AI in background termina i 4 Stems!).
     pub last_applied: Option<GuidedWizardChoices>,
@@ -670,10 +773,17 @@ impl Default for GuidedWizardState {
             track_name: String::new(),
             split_stems_ai: d.split_stems_ai,
             source_profile: d.source_profile,
-            bass_mode: d.bass_mode,
+            bass_boost: d.bass_boost,
             vocal_clarity: d.vocal_clarity,
             air_brilliance: d.air_brilliance,
             master_push: d.master_push,
+            autotune_mode: d.autotune_mode,
+            drum_mode: d.drum_mode,
+            bass_mode: d.bass_mode,
+            detected_bpm: 120.0,
+            custom_bpm_enabled: false,
+            custom_bpm_value: 120.0,
+            force_reseparate: false,
             last_applied: None,
         }
     }
@@ -683,26 +793,53 @@ impl Default for GuidedWizardState {
 impl GuidedWizardState {
     /// Apre il Wizard al Passo 1 per una nuova traccia appena caricata, impostando default ottimali.
     pub fn open_for_track(&mut self, track_name: &str) {
+        self.open_for_track_with_bpm(track_name, 120.0);
+    }
+
+    /// Apre il Wizard al Passo 1 precompilando il BPM rilevato automaticamente sul brano.
+    pub fn open_for_track_with_bpm(&mut self, track_name: &str, detected_bpm: f32) {
         let d = GuidedWizardChoices::default();
+        let clean_bpm = if detected_bpm.is_finite() && detected_bpm >= 45.0 {
+            detected_bpm.clamp(45.0, 240.0)
+        } else {
+            120.0
+        };
         self.open = true;
         self.step = 1;
         self.track_name = track_name.to_string();
         self.split_stems_ai = d.split_stems_ai;
         self.source_profile = d.source_profile;
-        self.bass_mode = d.bass_mode;
+        self.bass_boost = d.bass_boost;
         self.vocal_clarity = d.vocal_clarity;
         self.air_brilliance = d.air_brilliance;
         self.master_push = d.master_push;
+        self.autotune_mode = d.autotune_mode;
+        self.drum_mode = d.drum_mode;
+        self.bass_mode = d.bass_mode;
+        self.detected_bpm = clean_bpm;
+        self.custom_bpm_enabled = false;
+        self.custom_bpm_value = clean_bpm;
+        self.force_reseparate = false;
     }
 
     pub fn current_choices(&self) -> GuidedWizardChoices {
+        let target_bpm = if self.custom_bpm_enabled {
+            Some(self.custom_bpm_value.clamp(45.0, 240.0))
+        } else {
+            None
+        };
         GuidedWizardChoices {
             split_stems_ai: self.split_stems_ai,
             source_profile: self.source_profile,
-            bass_mode: self.bass_mode,
+            bass_boost: self.bass_boost,
             vocal_clarity: self.vocal_clarity,
             air_brilliance: self.air_brilliance,
             master_push: self.master_push,
+            autotune_mode: self.autotune_mode,
+            drum_mode: self.drum_mode,
+            bass_mode: self.bass_mode,
+            target_bpm,
+            force_reseparate: self.force_reseparate,
         }
     }
 
@@ -786,7 +923,7 @@ pub fn draw_guided_wizard_modal(
         return None;
     }
 
-    state.step = state.step.clamp(1, 3);
+    state.step = state.step.clamp(1, 4);
 
     if ctx.input_mut(|i| consume_key_once(i, Key::Escape)) {
         state.open = false;
@@ -842,6 +979,7 @@ pub fn draw_guided_wizard_modal(
                 let header_accent = match state.step {
                     1 => StudioPalette::STUDIO_VIOLET,
                     2 => StudioPalette::WARM_AMBER,
+                    3 => StudioPalette::ELECTRIC_CYAN,
                     _ => StudioPalette::EMERALD,
                 };
                 ui.painter()
@@ -897,15 +1035,21 @@ pub fn draw_guided_wizard_modal(
             ui.add_space(14.0_f32);
 
             // =================================================================
-            // CONTENUTO DEL PASSO ATTIVO (1, 2 o 3)
+            // CONTENUTO DEL PASSO ATTIVO (1, 2, 3 o 4)
             // =================================================================
-            match state.step {
-                1 => draw_step_1_split_choice(ui, state, content_w),
-                2 => draw_step_2_source_and_bass(ui, state, content_w),
-                _ => draw_step_3_vocal_air_master(ui, state, content_w),
-            }
+            let max_step_h = (screen.height() - 220.0_f32).clamp(240.0_f32, 520.0_f32);
+            egui::ScrollArea::vertical()
+                .id_salt(("wizard_step_scroll", state.step))
+                .max_height(max_step_h)
+                .auto_shrink([false, true])
+                .show(ui, |ui| match state.step {
+                    1 => draw_step_1_split_choice(ui, state, content_w),
+                    2 => draw_step_2_source_and_bass(ui, state, content_w),
+                    3 => draw_step_3_studio_ai_and_bpm(ui, state, content_w),
+                    _ => draw_step_4_vocal_air_master(ui, state, content_w),
+                });
 
-            ui.add_space(16.0_f32);
+            ui.add_space(14.0_f32);
 
             // Separatore sottile sopra la barra di navigazione
             let (sep_rect, _) =
@@ -913,7 +1057,7 @@ pub fn draw_guided_wizard_modal(
             ui.painter()
                 .rect_filled(sep_rect, CornerRadius::ZERO, StudioPalette::SUBTLE_HAIRLINE);
 
-            ui.add_space(12.0_f32);
+            ui.add_space(10.0_f32);
 
             // =================================================================
             // FOOTER DI NAVIGAZIONE
@@ -933,14 +1077,14 @@ pub fn draw_guided_wizard_modal(
                     }
                 } else {
                     ui.label(
-                        RichText::new("Suggerimento: potrai ritoccare l'EQ anche dopo")
-                            .size(11.8_f32)
+                        RichText::new("Suggerimento: potrai ritoccare EQ, BPM e tagli anche dopo")
+                            .size(11.6_f32)
                             .color(StudioPalette::MUTED_LABEL),
                     );
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if state.step < 3 {
+                    if state.step < 4 {
                         let next_accent = if state.step == 1 && state.split_stems_ai {
                             StudioPalette::STUDIO_VIOLET
                         } else {
@@ -956,7 +1100,7 @@ pub fn draw_guided_wizard_modal(
                         .clicked()
                             || enter_pressed
                         {
-                            state.step = (state.step + 1).min(3);
+                            state.step = (state.step + 1).min(4);
                         }
                     } else {
                         let cta_label = if state.split_stems_ai {
@@ -1002,14 +1146,15 @@ pub fn draw_guided_wizard_modal(
 }
 
 fn draw_step_indicator_strip(ui: &mut Ui, state: &mut GuidedWizardState, total_w: f32) {
-    let steps: [(u8, &str, Color32); 3] = [
-        (1, "PASSO 1 DI 3  •  Tracce", StudioPalette::STUDIO_VIOLET),
-        (2, "PASSO 2 DI 3  •  Bass Boost", StudioPalette::WARM_AMBER),
-        (3, "PASSO 3 DI 3  •  Finitura", StudioPalette::EMERALD),
+    let steps: [(u8, &str, Color32); 4] = [
+        (1, "1 • Tracce", StudioPalette::STUDIO_VIOLET),
+        (2, "2 • Bass Boost", StudioPalette::WARM_AMBER),
+        (3, "3 • Studio AI & BPM", StudioPalette::ELECTRIC_CYAN),
+        (4, "4 • Finitura", StudioPalette::EMERALD),
     ];
 
-    let gap = 8.0_f32;
-    let item_w = ((total_w - gap * 2.0_f32) / 3.0_f32).floor();
+    let gap = 6.0_f32;
+    let item_w = ((total_w - gap * 3.0_f32) / 4.0_f32).floor();
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
@@ -1060,7 +1205,7 @@ fn draw_step_indicator_strip(ui: &mut Ui, state: &mut GuidedWizardState, total_w
                 );
 
                 let display = if is_done {
-                    format!("✓  {label}")
+                    format!("✓ {label}")
                 } else {
                     label.to_string()
                 };
@@ -1075,7 +1220,7 @@ fn draw_step_indicator_strip(ui: &mut Ui, state: &mut GuidedWizardState, total_w
                     rect.center(),
                     Align2::CENTER_CENTER,
                     display,
-                    FontId::proportional(11.6_f32),
+                    FontId::proportional(11.4_f32),
                     text_col,
                 );
             }
@@ -1118,7 +1263,7 @@ fn draw_step_1_split_choice(ui: &mut Ui, state: &mut GuidedWizardState, total_w:
             &[
                 "• Separa Voce, Batteria, Basso e Chitarre in 4 piste",
                 "• Regoli volume, Mute e Solo di ogni strumento",
-                "• Usa la tua GPU NVIDIA in automatico",
+                "• Usa la tua GPU (AMD ROCm / NVIDIA CUDA) in automatico",
             ],
         ) {
             state.split_stems_ai = true;
@@ -1381,10 +1526,10 @@ fn draw_step_2_source_and_bass(ui: &mut Ui, state: &mut GuidedWizardState, total
             if draw_bass_boost_card(
                 ui,
                 Vec2::new(bass_w, bass_h),
-                state.bass_mode == mode,
+                state.bass_boost == mode,
                 mode,
             ) {
-                state.bass_mode = mode;
+                state.bass_boost = mode;
             }
         }
     });
@@ -1583,9 +1728,311 @@ fn draw_bass_boost_card(ui: &mut Ui, size: Vec2, selected: bool, mode: BassBoost
     resp.clicked()
 }
 
-fn draw_step_3_vocal_air_master(ui: &mut Ui, state: &mut GuidedWizardState, total_w: f32) {
+fn draw_step_3_studio_ai_and_bpm(ui: &mut Ui, state: &mut GuidedWizardState, total_w: f32) {
     ui.label(
-        RichText::new("3. Voce, Brillantezza & Spinta Finale")
+        RichText::new("3. Studio AI Avanzato & BPM")
+            .size(18.0_f32)
+            .strong()
+            .color(StudioPalette::CRISP_TEXT),
+    );
+    ui.add_space(2.0_f32);
+    let sub_info = if state.split_stems_ai {
+        "Rinforza Batteria e Basso senza suono pastoso, correggi l'intonazione voce e regola il BPM."
+    } else {
+        "Modalità Traccia Unica: la modifica BPM verrà applicata subito in tempo reale (le opzioni Stems AI valgono se attivi la separazione)."
+    };
+    ui.label(
+        RichText::new(sub_info)
+            .size(12.2_f32)
+            .color(StudioPalette::MUTED_LABEL),
+    );
+    ui.add_space(8.0_f32);
+
+    // 1. Auto-Tune Voce
+    draw_studio_ai_card_row(
+        ui,
+        total_w,
+        "Auto-Tune Voce (Intonazione Musicale)",
+        "Rileva tonalità e allinea le note",
+        StudioPalette::STUDIO_VIOLET,
+        [
+            (
+                AutoTuneMode::Off.label(),
+                state.autotune_mode == AutoTuneMode::Off,
+            ),
+            (
+                AutoTuneMode::Naturale.label(),
+                state.autotune_mode == AutoTuneMode::Naturale,
+            ),
+            (
+                AutoTuneMode::Moderno.label(),
+                state.autotune_mode == AutoTuneMode::Moderno,
+            ),
+        ],
+        |idx| {
+            state.autotune_mode = match idx {
+                0 => AutoTuneMode::Off,
+                1 => AutoTuneMode::Naturale,
+                _ => AutoTuneMode::Moderno,
+            };
+        },
+    );
+
+    ui.add_space(6.0_f32);
+
+    // 2. Sample Batteria Studio
+    draw_studio_ai_card_row(
+        ui,
+        total_w,
+        "Sample Batteria Studio",
+        "Aiuto Cassa & Rullante Anti-Pastoso",
+        StudioPalette::WARM_AMBER,
+        [
+            (
+                DrumSampleMode::Off.label(),
+                state.drum_mode == DrumSampleMode::Off,
+            ),
+            (
+                DrumSampleMode::Naturale.label(),
+                state.drum_mode == DrumSampleMode::Naturale,
+            ),
+            (
+                DrumSampleMode::StudioPunch.label(),
+                state.drum_mode == DrumSampleMode::StudioPunch,
+            ),
+        ],
+        |idx| {
+            state.drum_mode = match idx {
+                0 => DrumSampleMode::Off,
+                1 => DrumSampleMode::Naturale,
+                _ => DrumSampleMode::StudioPunch,
+            };
+        },
+    );
+
+    ui.add_space(6.0_f32);
+
+    // 3. Ricampionamento Basso
+    draw_studio_ai_card_row(
+        ui,
+        total_w,
+        "Ricampionamento Basso",
+        "Sub Pulito + Sidechain sulla Cassa",
+        StudioPalette::EMERALD,
+        [
+            (
+                BassEnhanceMode::Off.label(),
+                state.bass_mode == BassEnhanceMode::Off,
+            ),
+            (
+                BassEnhanceMode::Naturale.label(),
+                state.bass_mode == BassEnhanceMode::Naturale,
+            ),
+            (
+                BassEnhanceMode::StudioReAmp.label(),
+                state.bass_mode == BassEnhanceMode::StudioReAmp,
+            ),
+        ],
+        |idx| {
+            state.bass_mode = match idx {
+                0 => BassEnhanceMode::Off,
+                1 => BassEnhanceMode::Naturale,
+                _ => BassEnhanceMode::StudioReAmp,
+            };
+        },
+    );
+
+    ui.add_space(6.0_f32);
+
+    // 4. Velocità & BPM del Brano
+    Frame::NONE
+        .fill(StudioPalette::DEEP_OBSIDIAN)
+        .corner_radius(CornerRadius::same(11))
+        .stroke(Stroke::new(1.0_f32, StudioPalette::SUBTLE_HAIRLINE))
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            let inner_w = total_w - 24.0_f32;
+            ui.set_width(inner_w);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Velocità & BPM del Brano")
+                        .size(13.0_f32)
+                        .strong()
+                        .color(Color32::from_rgb(226, 234, 246)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new("WSOLA Stereo Phase-Locked (Zero Pitch-Shift)")
+                            .size(11.0_f32)
+                            .color(StudioPalette::ELECTRIC_CYAN),
+                    );
+                });
+            });
+            ui.add_space(5.0_f32);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0_f32;
+                let orig_lbl = format!("BPM Originale ({:.1})", state.detected_bpm);
+                if draw_segmented_choice_pill(
+                    ui,
+                    Vec2::new(164.0_f32, 30.0_f32),
+                    &orig_lbl,
+                    !state.custom_bpm_enabled,
+                    StudioPalette::ELECTRIC_CYAN,
+                ) {
+                    state.custom_bpm_enabled = false;
+                    state.custom_bpm_value = state.detected_bpm;
+                }
+
+                if draw_segmented_choice_pill(
+                    ui,
+                    Vec2::new(124.0_f32, 30.0_f32),
+                    "Personalizzato",
+                    state.custom_bpm_enabled,
+                    StudioPalette::STUDIO_VIOLET,
+                ) {
+                    state.custom_bpm_enabled = true;
+                }
+
+                ui.add_space(4.0_f32);
+
+                if pill_button(
+                    ui,
+                    "-1",
+                    false,
+                    StudioPalette::ELECTRIC_CYAN,
+                    Vec2::new(34.0_f32, 28.0_f32),
+                )
+                .on_hover_text("Riduci di 1.0 BPM")
+                .clicked()
+                {
+                    state.custom_bpm_enabled = true;
+                    state.custom_bpm_value = (state.custom_bpm_value - 1.0_f32).clamp(45.0, 240.0);
+                }
+
+                if pill_button(
+                    ui,
+                    "-0.5",
+                    false,
+                    StudioPalette::ELECTRIC_CYAN,
+                    Vec2::new(42.0_f32, 28.0_f32),
+                )
+                .on_hover_text("Riduci di 0.5 BPM")
+                .clicked()
+                {
+                    state.custom_bpm_enabled = true;
+                    state.custom_bpm_value = (state.custom_bpm_value - 0.5_f32).clamp(45.0, 240.0);
+                }
+
+                let drag_resp = ui.add_sized(
+                    [96.0_f32, 28.0_f32],
+                    egui::DragValue::new(&mut state.custom_bpm_value)
+                        .speed(0.1)
+                        .range(45.0_f32..=240.0_f32)
+                        .fixed_decimals(1)
+                        .suffix(" BPM"),
+                );
+                if drag_resp.changed() {
+                    state.custom_bpm_enabled = true;
+                }
+
+                if pill_button(
+                    ui,
+                    "+0.5",
+                    false,
+                    StudioPalette::ELECTRIC_CYAN,
+                    Vec2::new(42.0_f32, 28.0_f32),
+                )
+                .on_hover_text("Aumenta di 0.5 BPM")
+                .clicked()
+                {
+                    state.custom_bpm_enabled = true;
+                    state.custom_bpm_value = (state.custom_bpm_value + 0.5_f32).clamp(45.0, 240.0);
+                }
+
+                if pill_button(
+                    ui,
+                    "+1",
+                    false,
+                    StudioPalette::ELECTRIC_CYAN,
+                    Vec2::new(34.0_f32, 28.0_f32),
+                )
+                .on_hover_text("Aumenta di 1.0 BPM")
+                .clicked()
+                {
+                    state.custom_bpm_enabled = true;
+                    state.custom_bpm_value = (state.custom_bpm_value + 1.0_f32).clamp(45.0, 240.0);
+                }
+            });
+        });
+
+    if state.split_stems_ai {
+        ui.add_space(6.0_f32);
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut state.force_reseparate,
+                RichText::new("Ricalcola separazione AI da zero (ignora cache Stems già estratti)")
+                    .size(11.6_f32)
+                    .color(StudioPalette::MUTED_LABEL),
+            );
+        });
+    }
+}
+
+fn draw_studio_ai_card_row(
+    ui: &mut Ui,
+    total_w: f32,
+    title: &str,
+    subtitle: &str,
+    accent: Color32,
+    options: [(&str, bool); 3],
+    mut on_select: impl FnMut(usize),
+) {
+    Frame::NONE
+        .fill(StudioPalette::DEEP_OBSIDIAN)
+        .corner_radius(CornerRadius::same(11))
+        .stroke(Stroke::new(1.0_f32, StudioPalette::SUBTLE_HAIRLINE))
+        .inner_margin(Margin::symmetric(12, 7))
+        .show(ui, |ui| {
+            let inner_w = total_w - 24.0_f32;
+            ui.set_width(inner_w);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(title)
+                        .size(12.8_f32)
+                        .strong()
+                        .color(Color32::from_rgb(226, 234, 246)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(subtitle.trim())
+                            .size(10.8_f32)
+                            .color(StudioPalette::MUTED_LABEL),
+                    );
+                });
+            });
+            ui.add_space(4.0_f32);
+            ui.horizontal(|ui| {
+                let gap = 8.0_f32;
+                let btn_w = ((inner_w - gap * 2.0_f32) / 3.0_f32).floor();
+                ui.spacing_mut().item_spacing.x = gap;
+                for (idx, (opt_label, is_sel)) in options.into_iter().enumerate() {
+                    if draw_segmented_choice_pill(
+                        ui,
+                        Vec2::new(btn_w, 29.0_f32),
+                        opt_label,
+                        is_sel,
+                        accent,
+                    ) {
+                        on_select(idx);
+                    }
+                }
+            });
+        });
+}
+
+fn draw_step_4_vocal_air_master(ui: &mut Ui, state: &mut GuidedWizardState, total_w: f32) {
+    ui.label(
+        RichText::new("4. Voce, Brillantezza & Spinta Finale")
             .size(18.0_f32)
             .strong()
             .color(StudioPalette::CRISP_TEXT),
@@ -1694,13 +2141,13 @@ fn draw_step_3_vocal_air_master(ui: &mut Ui, state: &mut GuidedWizardState, tota
     let summary_head = if state.split_stems_ai {
         format!(
             "Verrà avviata la Separazione AI in 4 tracce + {} + {}",
-            state.bass_mode.label(),
+            state.bass_boost.label(),
             state.vocal_clarity.label()
         )
     } else {
         format!(
             "Applicazione istantanea su traccia singola + {} + {}",
-            state.bass_mode.label(),
+            state.bass_boost.label(),
             state.vocal_clarity.label()
         )
     };
@@ -1862,11 +2309,17 @@ mod tests {
     #[test]
     fn wizard_defaults_and_stem_offsets_match_spec() {
         let mut st = GuidedWizardState::default();
-        st.open_for_track("prova_band.mp3");
+        st.open_for_track_with_bpm("prova_band.mp3", 124.5);
         assert!(st.open);
         assert_eq!(st.step, 1);
         assert!(st.split_stems_ai);
-        assert_eq!(st.bass_mode, BassBoostMode::BassBoostPunch);
+        assert_eq!(st.bass_boost, BassBoostMode::BassBoostPunch);
+        assert_eq!(st.autotune_mode, AutoTuneMode::Off);
+        assert_eq!(st.drum_mode, DrumSampleMode::Naturale);
+        assert_eq!(st.bass_mode, BassEnhanceMode::Naturale);
+        assert!((st.detected_bpm - 124.5).abs() < 1e-4);
+        assert!(!st.custom_bpm_enabled);
+        assert_eq!(st.current_choices().target_bpm, None);
 
         let outcome = st.build_outcome(None);
         assert!(outcome.run_ai_split);
@@ -1880,10 +2333,15 @@ mod tests {
         let choices = GuidedWizardChoices {
             split_stems_ai: false,
             source_profile: SourceProfile::DemoMixPotenziato,
-            bass_mode: BassBoostMode::MegaSubBoost,
+            bass_boost: BassBoostMode::MegaSubBoost,
             vocal_clarity: VocalClarityMode::ExtraNitida,
             air_brilliance: AirMode::ExtraAria,
             master_push: MasterPushMode::MassimaSpinta,
+            autotune_mode: AutoTuneMode::Off,
+            drum_mode: DrumSampleMode::Naturale,
+            bass_mode: BassEnhanceMode::Naturale,
+            target_bpm: None,
+            force_reseparate: false,
         };
         let outcome = choices.build_outcome(None);
         let mut chain = StudioDspChain::new(48_000.0, &outcome.params);
@@ -1897,5 +2355,25 @@ mod tests {
             assert!(l.is_finite() && r.is_finite());
             assert!(l.abs() <= ceiling_lin && r.abs() <= ceiling_lin);
         }
+    }
+
+    #[test]
+    fn custom_bpm_and_stem_master_scaling_work_cleanly() {
+        let mut st = GuidedWizardState::default();
+        st.open_for_track_with_bpm("live_take.wav", 116.0);
+        st.custom_bpm_enabled = true;
+        st.custom_bpm_value = 128.0;
+        st.force_reseparate = true;
+
+        let ch = st.current_choices();
+        assert_eq!(ch.target_bpm, Some(128.0));
+        assert!(ch.force_reseparate);
+        assert!(ch.summary_line().contains("128.0 BPM"));
+
+        let single_p = ch.build_outcome(None).params;
+        let stems_p = ch.build_stem_master_params();
+        // Il Master Bus per i 4 Stems usa boost più delicati rispetto alla traccia singola
+        assert!(stems_p.bands[0].gain_db < single_p.bands[0].gain_db);
+        assert!(stems_p.comp_drive_db < single_p.comp_drive_db);
     }
 }

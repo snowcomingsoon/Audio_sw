@@ -2,8 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ai_pipeline;
+mod audio_editor;
 mod audio_io;
 mod auto_eq;
+mod bpm_stretch;
 mod dsp;
 mod eq_drawer;
 mod icon;
@@ -26,11 +28,20 @@ use eframe::egui::{
 };
 use rustfft::{num_complex::Complex, FftPlanner};
 
-use ai_pipeline::{draw_ai_header_button, draw_ai_pipeline_modal, AiPipelineController};
+use ai_pipeline::{
+    draw_ai_header_button, draw_ai_pipeline_modal, parse_ai_master_report, AiPipelineController,
+    AiPipelineOptions,
+};
+use audio_editor::{
+    apply_fade_in, apply_fade_out, boost_or_normalize_selection, copy_selection, crop_to_selection,
+    cut_selection, delete_selection, duplicate_selection, paste_at_playhead, silence_selection,
+    AudioClipboard, AudioEditHistory, GainEditOp,
+};
 use audio_io::{
     decode_audio_file, export_session, PlaybackSourceMode, RealtimeAudioEngine, StereoBuffer,
 };
 use auto_eq::analyze_and_compute_auto_eq;
+use bpm_stretch::{detect_bpm_fast, OriginalTempoRefs, MAX_USER_BPM, MIN_USER_BPM};
 use dsp::DspParams;
 use eq_drawer::{draw_eq_and_master_drawer, EqDrawerState};
 use project_io::{
@@ -38,7 +49,9 @@ use project_io::{
     save_preset_file,
 };
 use shortcuts_and_meters::{draw_shortcuts_modal, poll_daw_shortcuts, UndoStack};
-use timeline_view::{draw_multitrack_timeline, TimelineState};
+use timeline_view::{
+    draw_multitrack_timeline, TimelineEditAction, TimelineEditContext, TimelineState,
+};
 use ui_widgets::{pill_button, transport_play_button, StudioPalette};
 use wizard::{draw_guided_wizard_modal, GuidedWizardChoices, GuidedWizardState, SourceProfile};
 
@@ -54,6 +67,13 @@ struct StudioEqApp {
     timeline_ui: TimelineState,
     eq_ui: EqDrawerState,
     undo_stack: UndoStack,
+
+    edit_history: AudioEditHistory,
+    clipboard: AudioClipboard,
+    tempo_refs: OriginalTempoRefs,
+    ui_target_bpm: f32,
+    ai_badge_info: Option<String>,
+    tempo_refresh_ready: Arc<AtomicBool>,
 
     ai_ctrl: AiPipelineController,
     wizard_ui: GuidedWizardState,
@@ -122,6 +142,28 @@ impl StudioEqApp {
             }
         }
 
+        let symbol_candidates = [
+            r"C:\Windows\Fonts\seguisym.ttf",
+            "/System/Library/Fonts/Apple Symbols.ttf",
+        ];
+        for sym_cand in symbol_candidates {
+            if let Ok(sym_bytes) = std::fs::read(sym_cand) {
+                fonts.font_data.insert(
+                    "studio_symbols".to_owned(),
+                    Arc::new(FontData::from_owned(sym_bytes)),
+                );
+                let prop = fonts.families.entry(FontFamily::Proportional).or_default();
+                let insert_pos = prop.len().min(1);
+                prop.insert(insert_pos, "studio_symbols".to_owned());
+                fonts
+                    .families
+                    .entry(FontFamily::Monospace)
+                    .or_default()
+                    .push("studio_symbols".to_owned());
+                break;
+            }
+        }
+
         let mono_candidates = [
             r"C:\Windows\Fonts\consola.ttf",
             "/System/Library/Fonts/SFNSMono.ttf",
@@ -169,12 +211,27 @@ impl StudioEqApp {
 
         let default_out_dir = Self::locate_default_output_dir();
         let orig_candidate = default_out_dir.join("traccia_originale_sala.mp3");
-        let initial_path = orig_candidate.exists().then_some(orig_candidate);
-        let initial_name = if initial_path.is_some() {
-            "traccia_originale_sala.mp3".to_string()
+        let initial_path = if orig_candidate.exists() {
+            Some(orig_candidate)
         } else {
-            "Sessione Vuota".to_string()
+            Self::find_first_example_audio(&default_out_dir)
         };
+        let initial_name = initial_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Sessione Vuota".to_string());
+
+        let initial_report = std::fs::read_to_string(default_out_dir.join("ai_master_report.json"))
+            .ok()
+            .map(|txt| parse_ai_master_report(&txt));
+        let initial_bpm = initial_report
+            .as_ref()
+            .and_then(|r| r.effective_bpm)
+            .map(|b| b.clamp(MIN_USER_BPM, MAX_USER_BPM))
+            .unwrap_or(120.0_f32);
+        let initial_badge = initial_report.and_then(|r| r.format_italian_badge());
 
         let mut app = Self {
             engine,
@@ -187,6 +244,12 @@ impl StudioEqApp {
             timeline_ui: TimelineState::default(),
             eq_ui: EqDrawerState::default(),
             undo_stack: UndoStack::default(),
+            edit_history: AudioEditHistory::default(),
+            clipboard: AudioClipboard::default(),
+            tempo_refs: OriginalTempoRefs::default(),
+            ui_target_bpm: initial_bpm,
+            ai_badge_info: initial_badge,
+            tempo_refresh_ready: Arc::new(AtomicBool::new(false)),
             ai_ctrl: AiPipelineController::new(),
             wizard_ui: GuidedWizardState::default(),
             loading_busy: Arc::new(AtomicBool::new(false)),
@@ -203,22 +266,67 @@ impl StudioEqApp {
         app
     }
 
+    fn find_first_example_audio(out_dir: &Path) -> Option<PathBuf> {
+        let parent = out_dir.parent()?;
+        let ex_dir = parent.join("_esempi");
+        let entries = std::fs::read_dir(ex_dir).ok()?;
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|s| s.to_str())
+                    .map(|ext| {
+                        matches!(
+                            ext.to_ascii_lowercase().as_str(),
+                            "mp3" | "mpeg" | "wav" | "flac" | "ogg" | "m4a"
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        found.sort();
+        found.into_iter().next()
+    }
+
     fn locate_default_output_dir() -> PathBuf {
-        let mut candidates = vec![PathBuf::from(r"c:\_gestione ufficio\Audio SW\output")];
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(p) = exe.parent() {
-                candidates.push(p.join("output"));
-                if let Some(pp) = p.parent() {
-                    candidates.push(pp.join("output"));
-                    candidates.push(pp.join("Resources").join("output"));
+        let mut roots: Vec<PathBuf> = Vec::new();
+        let push_ancestors = |start: PathBuf, out: &mut Vec<PathBuf>| {
+            let mut cur: Option<&Path> = Some(start.as_path());
+            for _ in 0..5 {
+                if let Some(p) = cur {
+                    if !out.iter().any(|existing| existing == p) {
+                        out.push(p.to_path_buf());
+                    }
+                    cur = p.parent();
+                } else {
+                    break;
                 }
             }
-        }
-        for c in &candidates {
-            if c.exists() {
-                return c.clone();
+        };
+
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                push_ancestors(dir.to_path_buf(), &mut roots);
             }
         }
+        if let Ok(cwd) = std::env::current_dir() {
+            push_ancestors(cwd, &mut roots);
+        }
+
+        // 1. Preferisce la cartella del progetto che contiene lo script AI o un `output/` già popolato
+        for r in &roots {
+            let out_cand = r.join("output");
+            if out_cand.exists() {
+                return out_cand;
+            }
+            if r.join("demucs_pedalboard_master.py").exists() || r.join("Avvia_StudioEQ.bat").exists()
+            {
+                let _ = std::fs::create_dir_all(&out_cand);
+                return out_cand;
+            }
+        }
+
         #[cfg(target_os = "macos")]
         if let Ok(home) = std::env::var("HOME") {
             let user_out = PathBuf::from(home)
@@ -228,7 +336,14 @@ impl StudioEqApp {
             let _ = std::fs::create_dir_all(&user_out);
             return user_out;
         }
-        PathBuf::from(r"c:\_gestione ufficio\Audio SW\output")
+
+        let fallback = roots
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("output");
+        let _ = std::fs::create_dir_all(&fallback);
+        fallback
     }
 
     fn spawn_autoload_workspace(
@@ -244,30 +359,38 @@ impl StudioEqApp {
         let state_arc = Arc::clone(&eng.state);
         let busy = Arc::clone(&self.loading_busy);
         let bg_msg = Arc::clone(&self.bg_status);
+        let tempo_ready = Arc::clone(&self.tempo_refresh_ready);
+        let initial_fallback = self.loaded_file_path.clone();
         busy.store(true, Ordering::SeqCst);
 
         std::thread::spawn(move || {
             let sr = state_arc.lock().map(|s| s.device_sr).unwrap_or(44100);
 
             let orig = out_dir.join("traccia_originale_sala.mp3");
-            if wizard_choices.is_none() && orig.exists() {
-                if let Ok(buf) = decode_audio_file(&orig) {
-                    let resampled = buf.resample_to(sr);
-                    let initial_params = DspParams::preset_sala_prove();
-                    if let Ok(mut st) = state_arc.lock() {
-                        if st.main_track.is_none() {
-                            st.main_track = Some(resampled);
-                            st.mode = PlaybackSourceMode::OriginalWithLiveDsp;
-                            st.params = initial_params;
-                            st.params_dirty = true;
+            let main_source = orig
+                .exists()
+                .then_some(orig.clone())
+                .or(initial_fallback);
+            if wizard_choices.is_none() {
+                if let Some(ref src_path) = main_source {
+                    if let Ok(buf) = decode_audio_file(src_path) {
+                        let resampled = buf.resample_to(sr);
+                        let initial_params = DspParams::preset_sala_prove();
+                        if let Ok(mut st) = state_arc.lock() {
+                            if st.main_track.is_none() {
+                                st.main_track = Some(resampled);
+                                st.mode = PlaybackSourceMode::OriginalWithLiveDsp;
+                                st.params = initial_params;
+                                st.params_dirty = true;
+                            }
                         }
+                        if let Ok(mut m) = bg_msg.lock() {
+                            *m = Some(
+                                "Traccia principale pronta  •  Controllo 4 Stems AI...".to_string(),
+                            );
+                        }
+                        ctx.request_repaint();
                     }
-                    if let Ok(mut m) = bg_msg.lock() {
-                        *m = Some(
-                            "Traccia principale pronta  •  Caricamento 4 Stems AI...".to_string(),
-                        );
-                    }
-                    ctx.request_repaint();
                 }
             }
 
@@ -329,7 +452,7 @@ impl StudioEqApp {
                         );
                     }
                 }
-            } else if orig.exists() {
+            } else if main_source.is_some() {
                 if let Ok(mut m) = bg_msg.lock() {
                     *m = Some(
                         "Traccia pronta  •  Clicca Guidata, Auto-EQ o Separa AI per personalizzare il suono"
@@ -343,9 +466,182 @@ impl StudioEqApp {
                 );
             }
 
+            tempo_ready.store(true, Ordering::SeqCst);
             busy.store(false, Ordering::SeqCst);
             ctx.request_repaint();
         });
+    }
+
+    fn refresh_tempo_refs_from_engine(&mut self) {
+        let Some(ref eng) = self.engine else { return };
+        let snap = eng.state.lock().ok().map(|st| {
+            (
+                st.main_track.clone(),
+                st.ai_master_track.clone(),
+                st.stems.clone(),
+            )
+        });
+        let Some((main_t, ai_t, stems_t)) = snap else {
+            return;
+        };
+
+        let report_bpm = std::fs::read_to_string(self.loaded_dir.join("ai_master_report.json"))
+            .ok()
+            .map(|txt| parse_ai_master_report(&txt))
+            .and_then(|r| {
+                if self.ai_badge_info.is_none() {
+                    self.ai_badge_info = r.format_italian_badge();
+                }
+                r.effective_bpm
+            });
+
+        let detected = report_bpm.unwrap_or_else(|| {
+            if let Some(ref arr) = stems_t {
+                // La traccia Batteria (indice 1) offre i transienti più netti per il rilevamento BPM
+                detect_bpm_fast(&arr[1])
+            } else if let Some(ref m) = main_t {
+                detect_bpm_fast(m)
+            } else if let Some(ref a) = ai_t {
+                detect_bpm_fast(a)
+            } else {
+                120.0_f32
+            }
+        });
+
+        self.tempo_refs.store_loaded(main_t, ai_t, stems_t, detected);
+        self.ui_target_bpm = self.tempo_refs.current_bpm;
+        self.edit_history.clear();
+    }
+
+    fn apply_live_target_bpm(&mut self, target_bpm: f32) {
+        let Some(ref eng) = self.engine else { return };
+        let clamped = target_bpm.clamp(MIN_USER_BPM, MAX_USER_BPM);
+        let (new_main, new_ai, new_stems) = self.tempo_refs.render_for_target_bpm(clamped);
+        if new_main.is_none() && new_ai.is_none() && new_stems.is_none() {
+            self.status_msg = "Nessuna traccia audio attiva per il cambio BPM.".to_string();
+            return;
+        }
+
+        if let Ok(mut st) = eng.state.lock() {
+            let old_len = st.active_length().max(1);
+            self.edit_history.push_before_edit(&st);
+            st.main_track = new_main;
+            st.ai_master_track = new_ai;
+            st.stems = new_stems;
+            let new_len = st.active_length();
+            if new_len > 0 {
+                let scale = (new_len as f64) / (old_len as f64);
+                st.position_frame =
+                    ((st.position_frame as f64 * scale).round() as usize).min(new_len - 1);
+                if let Some((a, b)) = st.selection_range {
+                    let na = ((a as f64 * scale).round() as usize).min(new_len);
+                    let nb = ((b as f64 * scale).round() as usize).min(new_len);
+                    if nb > na + 16 {
+                        st.selection_range = Some((na, nb));
+                    } else {
+                        st.selection_range = None;
+                        st.loop_enabled = false;
+                    }
+                }
+            } else {
+                st.position_frame = 0;
+                st.selection_range = None;
+                st.loop_enabled = false;
+            }
+        }
+        self.tempo_refs.current_bpm = clamped;
+        self.ui_target_bpm = clamped;
+        self.status_msg = format!(
+            "BPM aggiornato senza distorsione: {:.1} BPM (Originale {:.1} BPM  •  Ctrl+Z per annullare)",
+            clamped, self.tempo_refs.detected_bpm
+        );
+    }
+
+    fn execute_timeline_edit(&mut self, action: TimelineEditAction) {
+        let Some(ref eng) = self.engine else { return };
+        let mut mutated = false;
+        let result: Result<String, String> = if let Ok(mut st) = eng.state.lock() {
+            match action {
+                TimelineEditAction::CutSelection => {
+                    let r = cut_selection(&mut st, &mut self.edit_history, &mut self.clipboard);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::DeleteSelection => {
+                    let r = delete_selection(&mut st, &mut self.edit_history);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::CropSelection => {
+                    let r = crop_to_selection(&mut st, &mut self.edit_history);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::SilenceSelection => {
+                    let r = silence_selection(&mut st, &mut self.edit_history);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::CopySelection => copy_selection(&st, &mut self.clipboard),
+                TimelineEditAction::PasteAtPlayhead => {
+                    let r = paste_at_playhead(&mut st, &mut self.edit_history, &self.clipboard);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::DuplicateSelection => {
+                    let r = duplicate_selection(&mut st, &mut self.edit_history);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::FadeIn => {
+                    let r = apply_fade_in(&mut st, &mut self.edit_history);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::FadeOut => {
+                    let r = apply_fade_out(&mut st, &mut self.edit_history);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::NormalizeSelection => {
+                    let r = boost_or_normalize_selection(
+                        &mut st,
+                        &mut self.edit_history,
+                        GainEditOp::NORMALIZE_MINUS_1DB,
+                    );
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::UndoAudioEdit => {
+                    let r = self.edit_history.undo(&mut st);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::RedoAudioEdit => {
+                    let r = self.edit_history.redo(&mut st);
+                    mutated = r.is_ok();
+                    r
+                }
+                TimelineEditAction::ClearSelection => {
+                    st.selection_range = None;
+                    st.loop_enabled = false;
+                    Ok("Selezione azzerata".to_string())
+                }
+            }
+        } else {
+            return;
+        };
+
+        if mutated {
+            if let Ok(st) = eng.state.lock() {
+                self.tempo_refs.sync_after_audio_edit(&st);
+            }
+        }
+
+        match result {
+            Ok(msg) => self.status_msg = msg,
+            Err(err) => self.status_msg = err,
+        }
     }
 
     fn load_main_file(&mut self, path: &Path) -> Result<(), String> {
@@ -355,13 +651,15 @@ impl StudioEqApp {
         };
         let sr = eng.state.lock().map(|s| s.device_sr).unwrap_or(44100);
         let resampled = buf.resample_to(sr);
+        let detected_bpm = detect_bpm_fast(&resampled);
         let initial_params = DspParams::preset_sala_prove();
 
         if let Ok(mut st) = eng.state.lock() {
             st.playing = false;
             st.position_frame = 0;
             st.selection_range = None;
-            st.main_track = Some(resampled);
+            st.loop_enabled = false;
+            st.main_track = Some(resampled.clone());
             st.stems = None;
             st.ai_master_track = None;
             st.mode = PlaybackSourceMode::OriginalWithLiveDsp;
@@ -375,6 +673,11 @@ impl StudioEqApp {
             st.params_dirty = true;
         }
         self.undo_stack.reset(initial_params);
+        self.edit_history.clear();
+        self.tempo_refs
+            .store_loaded(Some(resampled), None, None, detected_bpm);
+        self.ui_target_bpm = self.tempo_refs.current_bpm;
+        self.ai_badge_info = None;
         self.loaded_file_path = Some(path.to_path_buf());
         self.loaded_file_name = path
             .file_name()
@@ -382,12 +685,13 @@ impl StudioEqApp {
             .unwrap_or("traccia_audio")
             .to_string();
 
-        // Apre automaticamente il Menu Guidato (Step 1: Dividi Tracce? -> Step 2: Bass Boost -> Step 3: Tocco Finale)
-        self.wizard_ui.open_for_track(&self.loaded_file_name);
+        // Apre automaticamente il Menu Guidato precompilando il BPM rilevato
+        self.wizard_ui
+            .open_for_track_with_bpm(&self.loaded_file_name, detected_bpm);
 
         self.status_msg = format!(
-            "Caricato: {}  •  Scegli le opzioni nella Procedura Guidata",
-            self.loaded_file_name
+            "Caricato: {} ({:.1} BPM)  •  Scegli le opzioni nella Procedura Guidata",
+            self.loaded_file_name, detected_bpm
         );
         Ok(())
     }
@@ -431,12 +735,15 @@ impl StudioEqApp {
 
         if outcome.run_ai_split {
             if let Some(in_file) = self.loaded_file_path.clone() {
+                let ai_opts = AiPipelineOptions::from_wizard_choices(&choices);
                 self.ai_ctrl
-                    .start(in_file, self.loaded_dir.clone(), ctx.clone());
+                    .start(in_file, self.loaded_dir.clone(), ai_opts, ctx.clone());
             } else {
                 self.status_msg =
                     "Apri prima un file audio per avviare la separazione AI in 4 tracce".to_string();
             }
+        } else if let Some(tbpm) = choices.target_bpm {
+            self.apply_live_target_bpm(tbpm);
         }
     }
 
@@ -577,10 +884,21 @@ impl eframe::App for StudioEqApp {
             self.status_msg = ai_msg;
         }
 
+        if let Some(rep) = self.ai_ctrl.take_latest_report() {
+            self.ai_badge_info = rep.format_italian_badge();
+            if let Some(b) = rep.effective_bpm {
+                self.ui_target_bpm = b.clamp(MIN_USER_BPM, MAX_USER_BPM);
+            }
+        }
+
         if self.ai_ctrl.take_completed_flag() {
             let dir = self.loaded_dir.clone();
             let applied = self.wizard_ui.last_applied;
             self.spawn_autoload_workspace(dir, applied, ctx.clone());
+        }
+
+        if self.tempo_refresh_ready.swap(false, Ordering::SeqCst) {
+            self.refresh_tempo_refs_from_engine();
         }
 
         // Gestione screenshot GPU per verifica automatica UI (--screenshot <path.bmp>)
@@ -616,7 +934,7 @@ impl eframe::App for StudioEqApp {
             }
         }
 
-        // Scorciatoie da tastiera DAW + Undo/Redo (disattivate mentre il Menu Guidato è in primo piano)
+        // Scorciatoie da tastiera DAW + Editing Audio Non-Distruttivo + Undo/Redo
         if !self.wizard_ui.open {
             let sc = poll_daw_shortcuts(ctx);
             if sc.toggle_eq_drawer {
@@ -627,6 +945,54 @@ impl eframe::App for StudioEqApp {
             }
             if sc.run_auto_eq {
                 self.trigger_auto_eq();
+            }
+
+            let mut shortcut_edit_action: Option<TimelineEditAction> = None;
+            if sc.cut_selection {
+                shortcut_edit_action = Some(TimelineEditAction::CutSelection);
+            } else if sc.copy_selection {
+                shortcut_edit_action = Some(TimelineEditAction::CopySelection);
+            } else if sc.paste_selection {
+                shortcut_edit_action = Some(TimelineEditAction::PasteAtPlayhead);
+            } else if sc.delete_selection {
+                shortcut_edit_action = Some(TimelineEditAction::DeleteSelection);
+            } else if sc.crop_selection {
+                shortcut_edit_action = Some(TimelineEditAction::CropSelection);
+            } else if sc.duplicate_selection {
+                shortcut_edit_action = Some(TimelineEditAction::DuplicateSelection);
+            } else if sc.clear_selection {
+                shortcut_edit_action = Some(TimelineEditAction::ClearSelection);
+            }
+
+            if let Some(act) = shortcut_edit_action {
+                self.execute_timeline_edit(act);
+            }
+
+            if sc.undo {
+                if self.edit_history.can_undo() {
+                    self.execute_timeline_edit(TimelineEditAction::UndoAudioEdit);
+                } else if let Some(ref eng) = self.engine {
+                    if let Ok(mut st) = eng.state.lock() {
+                        if let Some(prev) = self.undo_stack.undo() {
+                            st.params = prev;
+                            st.params_dirty = true;
+                            self.status_msg = "Annullata modifica EQ/Master".to_string();
+                        }
+                    }
+                }
+            }
+            if sc.redo {
+                if self.edit_history.can_redo() {
+                    self.execute_timeline_edit(TimelineEditAction::RedoAudioEdit);
+                } else if let Some(ref eng) = self.engine {
+                    if let Ok(mut st) = eng.state.lock() {
+                        if let Some(next) = self.undo_stack.redo() {
+                            st.params = next;
+                            st.params_dirty = true;
+                            self.status_msg = "Ripristinata modifica EQ/Master".to_string();
+                        }
+                    }
+                }
             }
 
             if let Some(ref eng) = self.engine {
@@ -651,18 +1017,6 @@ impl eframe::App for StudioEqApp {
                         if st.stems.is_some() && stem_idx < 4 {
                             st.stem_channels[stem_idx].solo = !st.stem_channels[stem_idx].solo;
                             st.mode = PlaybackSourceMode::FourStemMixer;
-                        }
-                    }
-                    if sc.undo {
-                        if let Some(prev) = self.undo_stack.undo() {
-                            st.params = prev;
-                            st.params_dirty = true;
-                        }
-                    }
-                    if sc.redo {
-                        if let Some(next) = self.undo_stack.redo() {
-                            st.params = next;
-                            st.params_dirty = true;
                         }
                     }
                 }
@@ -844,22 +1198,113 @@ impl eframe::App for StudioEqApp {
                         }
                     }
 
-                    if pill_button(ui, "Guidata", self.wizard_ui.open, amber, Vec2::new(72.0_f32, 34.0_f32))
-                        .on_hover_text("Apri la Procedura Guidata semplice: Divisione tracce, Boost dei Bassi, Voce e Spinta Master")
+                    if pill_button(ui, "Guidata", self.wizard_ui.open, amber, Vec2::new(68.0_f32, 34.0_f32))
+                        .on_hover_text("Apri la Procedura Guidata 4-Step: Separazione AI, Bass Boost, Auto-Tune, Campioni Batteria/Basso e BPM")
                         .clicked()
                     {
                         let name = self.loaded_file_name.clone();
-                        self.wizard_ui.open_for_track(&name);
+                        self.wizard_ui
+                            .open_for_track_with_bpm(&name, self.tempo_refs.detected_bpm);
                     }
 
-                    if pill_button(ui, "Auto-EQ", false, cyan, Vec2::new(68.0_f32, 34.0_f32))
+                    if pill_button(ui, "Auto-EQ", false, cyan, Vec2::new(64.0_f32, 34.0_f32))
                         .on_hover_text("Analizza lo spettro e calcola l'EQ ottimale in automatico (Tasto A)")
                         .clicked()
                     {
                         self.trigger_auto_eq();
                     }
 
-                    if header_w >= 1340.0_f32 {
+                    // Controllo BPM Time-Stretch senza distorsione né cambio tonalità
+                    if total_frames > 0 && header_w >= 1120.0_f32 {
+                        let bpm_changed =
+                            (self.ui_target_bpm - self.tempo_refs.current_bpm).abs() >= 0.15_f32;
+                        let bpm_modified_from_orig =
+                            (self.tempo_refs.current_bpm - self.tempo_refs.detected_bpm).abs()
+                                >= 0.25_f32;
+                        let mut trigger_bpm_apply: Option<f32> = None;
+
+                        egui::Frame::NONE
+                            .fill(StudioPalette::DEEP_OBSIDIAN)
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                if bpm_modified_from_orig || bpm_changed {
+                                    violet
+                                } else {
+                                    StudioPalette::SUBTLE_HAIRLINE
+                                },
+                            ))
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(egui::Margin::symmetric(6, 4))
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.x = 3.0_f32;
+                                if pill_button(ui, "-", false, cyan, Vec2::new(20.0_f32, 24.0_f32))
+                                    .on_hover_text("-1 BPM")
+                                    .clicked()
+                                {
+                                    self.ui_target_bpm =
+                                        (self.ui_target_bpm - 1.0_f32).clamp(MIN_USER_BPM, MAX_USER_BPM);
+                                }
+                                let dv = ui.add(
+                                    egui::DragValue::new(&mut self.ui_target_bpm)
+                                        .range(MIN_USER_BPM..=MAX_USER_BPM)
+                                        .speed(0.25)
+                                        .fixed_decimals(1)
+                                        .suffix(" BPM"),
+                                );
+                                if dv
+                                    .on_hover_text(format!(
+                                        "Time-Stretch WSOLA Stereo Phase-Locked senza cambio tonalità\nBPM rilevato: {:.1} BPM (Invio o clicca Applica)",
+                                        self.tempo_refs.detected_bpm
+                                    ))
+                                    .lost_focus()
+                                    && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    trigger_bpm_apply = Some(self.ui_target_bpm);
+                                }
+                                if pill_button(ui, "+", false, cyan, Vec2::new(20.0_f32, 24.0_f32))
+                                    .on_hover_text("+1 BPM")
+                                    .clicked()
+                                {
+                                    self.ui_target_bpm =
+                                        (self.ui_target_bpm + 1.0_f32).clamp(MIN_USER_BPM, MAX_USER_BPM);
+                                }
+                                if bpm_changed {
+                                    if pill_button(
+                                        ui,
+                                        "Applica",
+                                        true,
+                                        violet,
+                                        Vec2::new(52.0_f32, 24.0_f32),
+                                    )
+                                    .on_hover_text("Applica subito il nuovo BPM mantenendo intatti pitch e transienti")
+                                    .clicked()
+                                    {
+                                        trigger_bpm_apply = Some(self.ui_target_bpm);
+                                    }
+                                } else if bpm_modified_from_orig
+                                    && pill_button(
+                                        ui,
+                                        "Orig",
+                                        false,
+                                        amber,
+                                        Vec2::new(36.0_f32, 24.0_f32),
+                                    )
+                                    .on_hover_text(format!(
+                                        "Ripristina il BPM originale rilevato ({:.1} BPM)",
+                                        self.tempo_refs.detected_bpm
+                                    ))
+                                    .clicked()
+                                {
+                                    trigger_bpm_apply = Some(self.tempo_refs.detected_bpm);
+                                }
+                            });
+
+                        if let Some(target_b) = trigger_bpm_apply {
+                            self.apply_live_target_bpm(target_b);
+                        }
+                    }
+
+                    if header_w >= 1460.0_f32 {
                         Self::draw_stereo_header_meter(ui, peak_l, peak_r, rms_db);
                     }
 
@@ -972,8 +1417,14 @@ impl eframe::App for StudioEqApp {
 
                         if draw_ai_header_button(ui, &mut self.ai_ctrl) {
                             if let Some(in_file) = self.loaded_file_path.clone() {
-                                self.ai_ctrl
-                                    .start(in_file, self.loaded_dir.clone(), ctx.clone());
+                                let last_ch = self.wizard_ui.last_applied.unwrap_or_default();
+                                let ai_opts = AiPipelineOptions::from_wizard_choices(&last_ch);
+                                self.ai_ctrl.start(
+                                    in_file,
+                                    self.loaded_dir.clone(),
+                                    ai_opts,
+                                    ctx.clone(),
+                                );
                             } else {
                                 self.status_msg =
                                     "Apri prima un file audio per separare gli strumenti con l'AI"
@@ -1074,11 +1525,21 @@ impl eframe::App for StudioEqApp {
                             }
                         }
 
-                        if footer_w >= 1180.0_f32 {
+                        if let Some(ref badge) = self.ai_badge_info {
+                            if footer_w >= 1020.0_f32 {
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(badge)
+                                        .monospace()
+                                        .size(11.3_f32)
+                                        .color(StudioPalette::ELECTRIC_CYAN),
+                                );
+                            }
+                        } else if footer_w >= 1180.0_f32 {
                             ui.separator();
                             ui.label(
                                 RichText::new(format!(
-                                    "{} Hz  •  Spazio: Play  •  B: Confronta A/B  •  1-4: Solo Strumenti  •  Ctrl+Z: Annulla",
+                                    "{} Hz  •  Spazio: Play  •  Canc/Ctrl+X: Taglia  •  Ctrl+T: Ritaglia  •  1-4: Solo",
                                     device_sr
                                 ))
                                 .size(11.5_f32)
@@ -1119,8 +1580,9 @@ impl eframe::App for StudioEqApp {
         }
 
         // =========================================================================
-        // 4. AREA CENTRALE: TIMELINE MULTI-TRACCIA CON FORME D'ONDA SEPARATE
+        // 4. AREA CENTRALE: TIMELINE MULTI-TRACCIA CON BARRA EDITING & FORME D'ONDA
         // =========================================================================
+        let mut pending_tl_action: Option<TimelineEditAction> = None;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::NONE
@@ -1128,12 +1590,25 @@ impl eframe::App for StudioEqApp {
                     .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
+                let edit_ctx = TimelineEditContext {
+                    has_clipboard: self.clipboard.has_content(),
+                    can_undo_edit: self.edit_history.can_undo(),
+                    can_redo_edit: self.edit_history.can_redo(),
+                };
                 if let Some(ref eng) = self.engine {
                     if let Ok(mut st) = eng.state.lock() {
-                        draw_multitrack_timeline(ui, &mut st, &mut self.timeline_ui);
+                        pending_tl_action = draw_multitrack_timeline(
+                            ui,
+                            &mut st,
+                            &mut self.timeline_ui,
+                            edit_ctx,
+                        );
                     }
                 }
             });
+        if let Some(act) = pending_tl_action {
+            self.execute_timeline_edit(act);
+        }
 
         // Modali In-App: Procedura Guidata 3-Step, Monitor Progresso AI GPU, Guida F1 e Drag&Drop
         if let Some(chosen) = draw_guided_wizard_modal(ctx, &mut self.wizard_ui) {

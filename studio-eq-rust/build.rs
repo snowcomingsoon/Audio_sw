@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,22 @@ fn find_rc_exe() -> Option<PathBuf> {
         candidates.sort();
         if let Some(best) = candidates.pop() {
             return Some(best);
+        }
+    }
+    None
+}
+
+fn find_windres_exe() -> Option<PathBuf> {
+    for candidate_name in ["windres.exe", "x86_64-w64-mingw32-windres.exe", "windres"] {
+        if let Ok(out) = Command::new("where").arg(candidate_name).output() {
+            if out.status.success() {
+                if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                    let p = PathBuf::from(line.trim());
+                    if p.exists() {
+                        return Some(p);
+                    }
+                }
+            }
         }
     }
     None
@@ -125,34 +143,60 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let res_path = out_dir.join("studio_eq_icon.res");
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
-    let mut compiled = false;
-    if let Some(rc_exe) = find_rc_exe() {
-        let rc_file = out_dir.join("studio_eq_icon.rc");
-        let escaped_ico = ico_path.to_string_lossy().replace('\\', "/");
-        let rc_content = format!("1 ICON \"{escaped_ico}\"\r\n");
-        if fs::write(&rc_file, rc_content).is_ok() {
-            if let Ok(status) = Command::new(rc_exe)
-                .args(["/nologo", "/fo"])
-                .arg(&res_path)
-                .arg(&rc_file)
-                .status()
-            {
-                compiled = status.success() && res_path.exists();
+    if target_env == "msvc" {
+        let res_path = out_dir.join("studio_eq_icon.res");
+        let mut compiled = false;
+
+        if let Some(rc_exe) = find_rc_exe() {
+            let rc_file = out_dir.join("studio_eq_icon.rc");
+            let escaped_ico = ico_path.to_string_lossy().replace('\\', "/");
+            let rc_content = format!("1 ICON \"{escaped_ico}\"\r\n");
+            if fs::write(&rc_file, rc_content).is_ok() {
+                if let Ok(status) = Command::new(rc_exe)
+                    .args(["/nologo", "/fo"])
+                    .arg(&res_path)
+                    .arg(&rc_file)
+                    .status()
+                {
+                    compiled = status.success() && res_path.exists();
+                }
             }
         }
-    }
 
-    if !compiled {
-        if let Ok(ico_bytes) = fs::read(&ico_path) {
-            if let Some(res_bytes) = build_res_from_ico(&ico_bytes) {
-                compiled = fs::write(&res_path, res_bytes).is_ok();
+        if !compiled {
+            if let Ok(ico_bytes) = fs::read(&ico_path) {
+                if let Some(res_bytes) = build_res_from_ico(&ico_bytes) {
+                    compiled = fs::write(&res_path, res_bytes).is_ok();
+                }
             }
         }
-    }
 
-    if compiled {
-        println!("cargo:rustc-link-arg-bins={}", res_path.display());
+        if compiled {
+            println!("cargo:rustc-link-arg-bins={}", res_path.display());
+        }
+    } else if target_env == "gnu" {
+        // Su MinGW/GNU ld.exe rifiuta file MSVC `.res`: compiliamo `.rc` -> `.o` via windres.exe se presente,
+        // altrimenti saltiamo il linking del `.res` (l'icona finestra resta impostata da `icon.rs`).
+        if let Some(windres_exe) = find_windres_exe() {
+            let rc_file = out_dir.join("studio_eq_icon.rc");
+            let obj_path = out_dir.join("studio_eq_icon.o");
+            let escaped_ico = ico_path.to_string_lossy().replace('\\', "/");
+            let rc_content = format!("1 ICON \"{escaped_ico}\"\r\n");
+            if fs::write(&rc_file, rc_content).is_ok() {
+                if let Ok(status) = Command::new(windres_exe)
+                    .arg("-i")
+                    .arg(&rc_file)
+                    .arg("-o")
+                    .arg(&obj_path)
+                    .status()
+                {
+                    if status.success() && obj_path.exists() {
+                        println!("cargo:rustc-link-arg-bins={}", obj_path.display());
+                    }
+                }
+            }
+        }
     }
 }

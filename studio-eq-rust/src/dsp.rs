@@ -633,4 +633,25 @@ mod argon_verification {
             );
         }
     }
+
+    #[test]
+    fn verify_bypass_passthrough_and_eq_curve_shapes() {
+        let mut params = DspParams::preset_sala_prove();
+        // Sala Prove taglia il mud intorno a 164 Hz e apre l'aria sopra 8 kHz
+        let mud_db = total_curve_db(&params, 164.0, 48_000.0);
+        let air_db = total_curve_db(&params, 10_000.0, 48_000.0);
+        assert!(mud_db < -4.0, "Expected mud cut at 164 Hz, got {mud_db}");
+        assert!(air_db > 5.0, "Expected air boost at 10 kHz, got {air_db}");
+
+        let flat = DspParams::preset_flat();
+        assert!(total_curve_db(&flat, 1_000.0, 48_000.0).abs() < 0.05);
+
+        params.bypass = true;
+        assert_eq!(total_curve_db(&params, 164.0, 48_000.0), 0.0);
+        let mut chain = StudioDspChain::new(48_000.0, &params);
+        let (ol, or) = chain.process_frame(0.37, -0.42, &params);
+        assert_eq!(ol, 0.37);
+        assert_eq!(or, -0.42);
+        assert_eq!(chain.last_gain_reduction_db, 0.0);
+    }
 }

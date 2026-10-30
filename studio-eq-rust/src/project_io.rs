@@ -1,4 +1,4 @@
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, SQRT_2};
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
@@ -6,7 +6,7 @@ use eframe::egui::{
     StrokeKind, Vec2,
 };
 
-use crate::audio_io::{StemChannel, StereoBuffer};
+use crate::audio_io::{constant_power_pan_gains, soft_limit_to_pcm24, StemChannel, StereoBuffer};
 use crate::dsp::{DspParams, FilterKind};
 
 const STEM_EXPORT_FILENAMES: [&str; 4] = [
@@ -18,34 +18,6 @@ const STEM_EXPORT_FILENAMES: [&str; 4] = [
 
 const SUPPORTED_AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "mpeg", "wav", "flac", "ogg", "m4a"];
 
-#[inline]
-fn stem_pan_multipliers(pan: f32) -> (f32, f32) {
-    // Legge di pan a potenza costante normalizzata (0.0 = guadagno unitario 1.0 su L e R)
-    let angle = (pan.clamp(-1.0_f32, 1.0_f32) + 1.0_f32) * FRAC_PI_4;
-    (angle.cos() * SQRT_2, angle.sin() * SQRT_2)
-}
-
-#[inline]
-fn soft_limit_to_pcm24(sample: f32) -> i32 {
-    const SCALE_24BIT: f32 = 8_388_607.0_f32;
-    const KNEE: f32 = 0.94_f32;
-    const CEIL: f32 = 0.9999_f32;
-
-    if !sample.is_finite() {
-        return 0;
-    }
-
-    let ax = sample.abs();
-    let shaped = if ax > KNEE {
-        let span = CEIL - KNEE;
-        KNEE + span * ((ax - KNEE) / span).tanh()
-    } else {
-        ax
-    };
-    let clamped = (sample.signum() * shaped).clamp(-1.0_f32, 1.0_f32);
-    (clamped * SCALE_24BIT).round() as i32
-}
-
 /// Esporta tutti i 4 Stems separati in formato WAV 24-bit Studio nella cartella indicata,
 /// applicando `gain_db` e `pan` impostati dall'utente nel mixer.
 pub fn export_all_stems_wav(
@@ -53,7 +25,7 @@ pub fn export_all_stems_wav(
     channels: &[StemChannel; 4],
     folder: &Path,
 ) -> Result<usize, String> {
-    if stems.iter().all(|s| s.len() == 0) {
+    if stems.iter().all(|s| s.is_empty()) {
         return Err("Nessuno Stem audio disponibile per l'esportazione.".to_string());
     }
 
@@ -75,7 +47,7 @@ pub fn export_all_stems_wav(
 
         let ch = &channels[idx];
         let gain_lin = 10.0_f32.powf(ch.gain_db / 20.0_f32);
-        let (pan_l, pan_r) = stem_pan_multipliers(ch.pan);
+        let (pan_l, pan_r) = constant_power_pan_gains(ch.pan);
         let mult_l = gain_lin * pan_l;
         let mult_r = gain_lin * pan_r;
 

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -18,6 +20,107 @@ use eframe::egui::{
 };
 
 use crate::ui_widgets::{brighten, pill_button, StudioPalette};
+use crate::wizard::GuidedWizardChoices;
+
+/// Opzioni Studio AI passate a `demucs_pedalboard_master.py` tramite `ai_pipeline_options.json`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AiPipelineOptions {
+    pub autotune_mode: &'static str,
+    pub drum_mode: &'static str,
+    pub bass_mode: &'static str,
+    pub target_bpm: Option<f32>,
+    pub force_reseparate: bool,
+}
+
+impl Default for AiPipelineOptions {
+    fn default() -> Self {
+        Self {
+            autotune_mode: "off",
+            drum_mode: "natural",
+            bass_mode: "natural",
+            target_bpm: None,
+            force_reseparate: false,
+        }
+    }
+}
+
+impl AiPipelineOptions {
+    pub fn from_wizard_choices(c: &GuidedWizardChoices) -> Self {
+        Self {
+            autotune_mode: c.autotune_mode.as_json_str(),
+            drum_mode: c.drum_mode.as_json_str(),
+            bass_mode: c.bass_mode.as_json_str(),
+            target_bpm: c.target_bpm,
+            force_reseparate: c.force_reseparate,
+        }
+    }
+
+    pub fn to_json_pretty(&self) -> String {
+        let bpm_txt = match self.target_bpm {
+            Some(b) if b.is_finite() && b >= 45.0 => format!("{b:.2}"),
+            _ => "null".to_string(),
+        };
+        let force_txt = if self.force_reseparate {
+            "true"
+        } else {
+            "false"
+        };
+        format!(
+            "{{\n  \"autotune_mode\": \"{}\",\n  \"drum_mode\": \"{}\",\n  \"bass_mode\": \"{}\",\n  \"target_bpm\": {},\n  \"force_reseparate\": {}\n}}\n",
+            self.autotune_mode, self.drum_mode, self.bass_mode, bpm_txt, force_txt
+        )
+    }
+}
+
+/// Report telemetrico generato a fine pipeline in `<out_dir>/ai_master_report.json`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AiMasterReport {
+    pub detected_key: Option<String>,
+    pub effective_bpm: Option<f32>,
+    pub kicks: Option<u32>,
+    pub snares: Option<u32>,
+}
+
+impl AiMasterReport {
+    pub fn format_italian_badge(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(ref key) = self.detected_key {
+            if !key.trim().is_empty() {
+                parts.push(format!("Tonalità: {}", key.trim()));
+            }
+        }
+        if let Some(bpm) = self.effective_bpm {
+            if bpm.is_finite() && bpm >= 40.0 {
+                parts.push(format!("{bpm:.1} BPM"));
+            }
+        }
+        match (self.kicks, self.snares) {
+            (Some(k), Some(s)) if k > 0 || s > 0 => {
+                parts.push(format!("Cassa: {k} | Rullante: {s}"));
+            }
+            _ => {}
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("  •  "))
+        }
+    }
+}
+
+pub fn parse_ai_master_report(json_text: &str) -> AiMasterReport {
+    let detected_key = extract_json_str(json_text, "detected_key");
+    let effective_bpm = extract_json_f32(json_text, "effective_bpm")
+        .or_else(|| extract_json_f32(json_text, "detected_bpm"));
+    let kicks = extract_json_f32(json_text, "kicks").map(|v| v.max(0.0).round() as u32);
+    let snares = extract_json_f32(json_text, "snares").map(|v| v.max(0.0).round() as u32);
+    AiMasterReport {
+        detected_key,
+        effective_bpm,
+        kicks,
+        snares,
+    }
+}
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -65,6 +168,7 @@ struct SharedAiState {
     logs: VecDeque<String>,
     last_error_line: Option<String>,
     pending_summary: Option<String>,
+    latest_report: Option<AiMasterReport>,
 }
 
 impl SharedAiState {
@@ -91,6 +195,7 @@ impl SharedAiState {
             logs: VecDeque::with_capacity(MAX_LOG_LINES + 2),
             last_error_line: None,
             pending_summary: None,
+            latest_report: None,
         }
     }
 
@@ -165,6 +270,14 @@ impl AiPipelineController {
             .and_then(|mut st| st.pending_summary.take())
     }
 
+    /// Restituisce una sola volta il report telemetrico JSON (`Tonalità`, `BPM`, `Cassa/Rullante`) a fine corsa.
+    pub fn take_latest_report(&self) -> Option<AiMasterReport> {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|mut st| st.latest_report.take())
+    }
+
     pub fn set_modal_open(&mut self, open: bool) {
         self.modal_open = open;
         if open {
@@ -180,7 +293,13 @@ impl AiPipelineController {
         self.modal_open
     }
 
-    pub fn start(&mut self, input_file: PathBuf, out_dir: PathBuf, ctx: egui::Context) {
+    pub fn start(
+        &mut self,
+        input_file: PathBuf,
+        out_dir: PathBuf,
+        options: AiPipelineOptions,
+        ctx: egui::Context,
+    ) {
         if self.is_running() {
             self.modal_open = true;
             return;
@@ -220,6 +339,7 @@ impl AiPipelineController {
             st.input_file_label = file_label.clone();
             st.logs.clear();
             st.last_error_line = None;
+            st.latest_report = None;
             push_log_line(
                 &mut st.logs,
                 format!("[Avvio] Sorgente: {file_label}  •  Pipeline 44.1 kHz / 24-bit"),
@@ -241,20 +361,40 @@ impl AiPipelineController {
             let py_exe = resolve_python_executable();
             let script_path = resolve_pipeline_script();
 
-            // Rimuove la cache raw precedente per forzare una separazione AI pulita quando richiesta
-            let _ = std::fs::remove_dir_all(out_dir.join("stems_raw"));
+            let _ = std::fs::create_dir_all(&out_dir);
+            let cfg_path = out_dir.join("ai_pipeline_options.json");
+            let _ = std::fs::write(&cfg_path, options.to_json_pretty());
 
-            let mut cmd = Command::new(py_exe);
+            // Rimuove la cache raw solo quando l'utente forza esplicitamente la ri-separazione AI
+            if options.force_reseparate {
+                let _ = std::fs::remove_dir_all(out_dir.join("stems_raw"));
+            }
+
+            let enriched_path = build_enriched_path(&py_exe);
+
+            let mut cmd = Command::new(&py_exe);
             cmd.arg("-u")
-                .arg(script_path)
+                .arg(&script_path)
                 .arg(&input_file)
                 .arg(&out_dir)
+                .arg("--config-file")
+                .arg(&cfg_path)
+                .env("PATH", enriched_path)
                 .env("PYTHONUNBUFFERED", "1")
                 .env("PYTHONIOENCODING", "utf-8")
                 .env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+                .env("TORCH_BLAS_PREFER_HIPBLASLT", "0")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+
+            // Installer standalone: il modello Demucs viene fornito nella cache locale dell'app.
+            if let Some(app_root) = script_path.parent() {
+                let bundled_hf_home = app_root.join("models");
+                if bundled_hf_home.join("hub").exists() {
+                    cmd.env("HF_HOME", bundled_hf_home);
+                }
+            }
 
             #[cfg(target_os = "windows")]
             {
@@ -378,6 +518,9 @@ impl AiPipelineController {
 
             match wait_result {
                 Some(Ok(status)) if status.success() => {
+                    let parsed_report = std::fs::read_to_string(out_dir.join("ai_master_report.json"))
+                        .ok()
+                        .map(|txt| parse_ai_master_report(&txt));
                     if let Ok(mut st) = state_arc.lock() {
                         st.outcome = RunOutcome::Success;
                         st.pct = 100.0_f32;
@@ -391,6 +534,7 @@ impl AiPipelineController {
                         st.finished_elapsed_secs = Some(st.elapsed_secs());
                         st.completed_at = Some(Instant::now());
                         st.auto_close_armed = true;
+                        st.latest_report = parsed_report;
                         push_log_line(
                             &mut st.logs,
                             "[Completato] 4 Stems WAV 24-bit + Master -11.2 LUFS pronti in Timeline."
@@ -470,26 +614,124 @@ impl AiPipelineController {
     }
 }
 
-fn resolve_python_executable() -> &'static str {
-    let candidates = [
-        r"c:\_gestione ufficio\Audio SW\.venv\Scripts\python.exe",
-        r"C:\Users\Lorenzo\.gemini\antigravity\scratch\studio-eq-mastering\.venv\Scripts\python.exe",
-    ];
-    candidates
-        .into_iter()
-        .find(|p| Path::new(p).exists())
-        .unwrap_or("python")
+fn candidate_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let push_ancestors = |start: PathBuf, out: &mut Vec<PathBuf>| {
+        let mut cur: Option<&Path> = Some(start.as_path());
+        for _ in 0..5 {
+            if let Some(p) = cur {
+                if !out.iter().any(|existing| existing == p) {
+                    out.push(p.to_path_buf());
+                }
+                cur = p.parent();
+            } else {
+                break;
+            }
+        }
+    };
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push_ancestors(dir.to_path_buf(), &mut roots);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        push_ancestors(cwd, &mut roots);
+    }
+    roots
 }
 
-fn resolve_pipeline_script() -> &'static str {
-    let candidates = [
-        r"c:\_gestione ufficio\Audio SW\demucs_pedalboard_master.py",
-        r"C:\Users\Lorenzo\.gemini\antigravity\scratch\studio-eq-mastering\demucs_pedalboard_master.py",
-    ];
-    candidates
+fn is_windows_store_stub(path: &Path) -> bool {
+    path.to_string_lossy()
+        .to_ascii_lowercase()
+        .contains("windowsapps")
+}
+
+fn resolve_python_executable() -> PathBuf {
+    for root in candidate_search_roots() {
+        #[cfg(target_os = "windows")]
+        let venv_py = root.join(".venv").join("Scripts").join("python.exe");
+        #[cfg(not(target_os = "windows"))]
+        let venv_py = root.join(".venv").join("bin").join("python");
+
+        if venv_py.exists() && !is_windows_store_stub(&venv_py) {
+            return venv_py;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+            let py_root = PathBuf::from(&local_app).join("Programs").join("Python");
+            if let Ok(entries) = std::fs::read_dir(py_root) {
+                let mut found: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path().join("python.exe"))
+                    .filter(|p| p.exists() && !is_windows_store_stub(p))
+                    .collect();
+                found.sort();
+                if let Some(best) = found.pop() {
+                    return best;
+                }
+            }
+        }
+
+        let mut where_cmd = Command::new("where");
+        where_cmd
+            .arg("python")
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null());
+        if let Ok(out) = where_cmd.output() {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let p = PathBuf::from(line.trim());
+                    if p.exists() && !is_windows_store_stub(&p) {
+                        return p;
+                    }
+                }
+            }
+        }
+    }
+
+    PathBuf::from("python")
+}
+
+fn resolve_pipeline_script() -> PathBuf {
+    for root in candidate_search_roots() {
+        let candidate = root.join("demucs_pedalboard_master.py");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    PathBuf::from("demucs_pedalboard_master.py")
+}
+
+fn build_enriched_path(py_exe: &Path) -> String {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(py_dir) = py_exe.parent() {
+        dirs.push(py_dir.to_path_buf());
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+        let winget_links = PathBuf::from(&local_app)
+            .join("Microsoft")
+            .join("WinGet")
+            .join("Links");
+        if winget_links.exists() {
+            dirs.push(winget_links);
+        }
+    }
+    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let mut parts: Vec<String> = dirs
         .into_iter()
-        .find(|p| Path::new(p).exists())
-        .unwrap_or("demucs_pedalboard_master.py")
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect();
+    if let Ok(existing) = std::env::var("PATH") {
+        if !existing.is_empty() {
+            parts.push(existing);
+        }
+    }
+    parts.join(sep)
 }
 
 fn terminate_child_tree(child: &mut Child) {
@@ -608,6 +850,15 @@ fn is_ignorable_noise_line(line: &str) -> bool {
         || trimmed.starts_with("\"output_wav\"")
         || trimmed.starts_with("\"output_mp3\"")
         || trimmed.starts_with("\"stems_dir\"")
+        || trimmed.starts_with("\"detected_bpm\"")
+        || trimmed.starts_with("\"effective_bpm\"")
+        || trimmed.starts_with("\"detected_key\"")
+        || trimmed.starts_with("\"drum_hits\"")
+        || trimmed.starts_with("\"kicks\"")
+        || trimmed.starts_with("\"snares\"")
+        || trimmed.starts_with("\"autotune_mode\"")
+        || trimmed.starts_with("\"drum_mode\"")
+        || trimmed.starts_with("\"bass_mode\"")
 }
 
 fn push_log_line(logs: &mut VecDeque<String>, entry: String) {
@@ -626,14 +877,36 @@ fn push_log_line(logs: &mut VecDeque<String>, entry: String) {
 fn normalize_gpu_badge(raw_gpu: &str, is_cuda_hint: bool) -> (String, bool) {
     let trimmed = raw_gpu.trim();
     let upper = trimmed.to_ascii_uppercase();
-    if upper.contains("CPU") && !upper.contains("CUDA") {
+    if upper.contains("CPU") && !upper.contains("CUDA") && !upper.contains("ROCM") && !upper.contains("RADEON") {
         let label = if upper.starts_with("CPU") {
             trimmed.replace(" - ", " • ").replace(": ", " • ")
         } else {
             format!("CPU • {trimmed}")
         };
         (label, false)
-    } else if is_cuda_hint || upper.contains("CUDA") || upper.contains("NVIDIA") || upper.contains("RTX") || upper.contains("GTX") || upper.contains("GEFORCE") {
+    } else if upper.contains("ROCM")
+        || upper.contains("AMD")
+        || upper.contains("RADEON")
+        || upper.contains("RX ")
+    {
+        let stripped = if upper.starts_with("ROCM") || upper.starts_with("CUDA") {
+            trimmed[4..]
+                .trim_start_matches(|c: char| c == ':' || c == '-' || c == '•' || c.is_whitespace())
+        } else {
+            trimmed
+        };
+        if stripped.is_empty() {
+            ("ROCm • GPU AMD Attiva".to_string(), true)
+        } else {
+            (format!("ROCm • {stripped}"), true)
+        }
+    } else if is_cuda_hint
+        || upper.contains("CUDA")
+        || upper.contains("NVIDIA")
+        || upper.contains("RTX")
+        || upper.contains("GTX")
+        || upper.contains("GEFORCE")
+    {
         if upper.starts_with("CUDA") {
             let rest = trimmed[4..]
                 .trim_start_matches(|c: char| c == ':' || c == '-' || c == '•' || c.is_whitespace());
@@ -2308,4 +2581,79 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let bl = (a.b() as f32 * inv + b.b() as f32 * t).round() as u8;
     let al = (a.a() as f32 * inv + b.a() as f32 * t).round() as u8;
     Color32::from_rgba_unmultiplied(r, g, bl, al)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wizard::{AutoTuneMode, BassEnhanceMode, DrumSampleMode};
+
+    #[test]
+    fn test_ai_pipeline_options_json_serialization() {
+        let mut choices = GuidedWizardChoices::default();
+        let def_opts = AiPipelineOptions::from_wizard_choices(&choices);
+        let json_default = def_opts.to_json_pretty();
+        assert!(json_default.contains("\"autotune_mode\": \"off\""));
+        assert!(json_default.contains("\"drum_mode\": \"natural\""));
+        assert!(json_default.contains("\"bass_mode\": \"natural\""));
+        assert!(json_default.contains("\"target_bpm\": null"));
+        assert!(json_default.contains("\"force_reseparate\": false"));
+
+        choices.autotune_mode = AutoTuneMode::Moderno;
+        choices.drum_mode = DrumSampleMode::StudioPunch;
+        choices.bass_mode = BassEnhanceMode::StudioReAmp;
+        choices.target_bpm = Some(128.5);
+        choices.force_reseparate = true;
+
+        let custom_opts = AiPipelineOptions::from_wizard_choices(&choices);
+        let json_custom = custom_opts.to_json_pretty();
+        assert!(json_custom.contains("\"autotune_mode\": \"modern\""));
+        assert!(json_custom.contains("\"drum_mode\": \"punch\""));
+        assert!(json_custom.contains("\"bass_mode\": \"reamp\""));
+        assert!(json_custom.contains("\"target_bpm\": 128.50"));
+        assert!(json_custom.contains("\"force_reseparate\": true"));
+    }
+
+    #[test]
+    fn test_parse_ai_master_report_and_italian_badge() {
+        let raw_json = r#"{
+            "original_lufs": -18.4,
+            "detected_key": "La Minore \u2022 A min",
+            "detected_bpm": 118.0,
+            "effective_bpm": 122.4,
+            "drum_hits": {
+                "kicks": 142,
+                "snares": 96
+            }
+        }"#;
+
+        let rep = parse_ai_master_report(raw_json);
+        assert_eq!(rep.detected_key.as_deref(), Some("La Minore • A min"));
+        assert!((rep.effective_bpm.unwrap() - 122.4).abs() < 1e-3);
+        assert_eq!(rep.kicks, Some(142));
+        assert_eq!(rep.snares, Some(96));
+
+        let badge = rep.format_italian_badge().expect("badge expected");
+        assert!(badge.contains("Tonalità: La Minore • A min"));
+        assert!(badge.contains("122.4 BPM"));
+        assert!(badge.contains("Cassa: 142 | Rullante: 96"));
+    }
+
+    #[test]
+    fn test_tqdm_and_gpu_badge_parsing() {
+        let tqdm_line = " 42%|████▏     | 115.2/274.0 [00:04<00:06, 25.40seconds/s]";
+        let m = parse_tqdm_line(tqdm_line).expect("tqdm expected");
+        assert!((m.sub_pct - 42.0).abs() < 1e-3);
+        assert_eq!(m.eta_txt.as_deref(), Some("ETA 00:06"));
+        assert_eq!(m.speed_txt.as_deref(), Some("25.4x tempo reale"));
+
+        let (cuda_lbl, cuda_on) = normalize_gpu_badge("NVIDIA GeForce RTX 4070", true);
+        assert!(cuda_on && cuda_lbl.starts_with("CUDA •"));
+
+        let (rocm_lbl, rocm_on) = normalize_gpu_badge("AMD Radeon RX 7900 XT", false);
+        assert!(rocm_on && rocm_lbl.starts_with("ROCm •"));
+
+        let (cpu_lbl, cpu_on) = normalize_gpu_badge("CPU - 16 Threads", false);
+        assert!(!cpu_on && cpu_lbl.starts_with("CPU •"));
+    }
 }

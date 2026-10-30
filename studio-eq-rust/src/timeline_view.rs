@@ -36,13 +36,50 @@ fn stem_accent_color(idx: usize) -> Color32 {
     }
 }
 
+/// Azioni immediate emesse dalla Barra Strumenti Editing Audio in cima alla Timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimelineEditAction {
+    CutSelection,
+    DeleteSelection,
+    CropSelection,
+    SilenceSelection,
+    CopySelection,
+    PasteAtPlayhead,
+    DuplicateSelection,
+    FadeIn,
+    FadeOut,
+    NormalizeSelection,
+    UndoAudioEdit,
+    RedoAudioEdit,
+    ClearSelection,
+}
+
+/// Stato live passato dal controller principale alla Barra Strumenti Editing Audio.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TimelineEditContext {
+    pub has_clipboard: bool,
+    pub can_undo_edit: bool,
+    pub can_redo_edit: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionDragKind {
+    Creating { anchor: usize },
+    AdjustLeft { fixed_right: usize },
+    AdjustRight { fixed_left: usize },
+}
+
 /// Stato visuale della Timeline Multi-Traccia (zoom, scorrimento orizzontale e selezione regione).
 #[derive(Clone, Debug)]
 pub struct TimelineState {
     pub zoom: f32,
     pub scroll_norm: f32,
+    #[allow(dead_code)]
     pub drag_select_start: Option<usize>,
+    #[allow(dead_code)]
     pub ruler_drag_start: Option<usize>,
+    pub lane_drag: Option<SelectionDragKind>,
+    pub ruler_drag: Option<SelectionDragKind>,
 }
 
 impl Default for TimelineState {
@@ -52,22 +89,518 @@ impl Default for TimelineState {
             scroll_norm: 0.0_f32,
             drag_select_start: None,
             ruler_drag_start: None,
+            lane_drag: None,
+            ruler_drag: None,
         }
     }
 }
 
-/// Disegna la Timeline Multi-Traccia stile Audacity 4 / Logic Pro / Moises.ai con righello adattivo,
-/// corsie separate per i 4 Stems Demucs (o traccia Stereo principale), controlli M/S/Volume/Pan,
-/// mini LED meter live, forme d'onda Peak + RMS e playhead sincronizzato.
+fn fmt_mm_ss_tenths(sec: f64) -> String {
+    let total_tenths = (sec.max(0.0) * 10.0).round() as u64;
+    let mins = total_tenths / 600;
+    let secs = (total_tenths / 10) % 60;
+    let tenths = total_tenths % 10;
+    format!("{mins:02}:{secs:02}.{tenths}")
+}
+
+fn toolbar_action_pill(
+    ui: &mut Ui,
+    label: &str,
+    enabled: bool,
+    accent: Color32,
+    height: f32,
+) -> egui::Response {
+    let font = FontId::proportional(11.1_f32);
+    let text_col = if enabled {
+        Color32::from_rgb(236, 242, 250)
+    } else {
+        Color32::from_rgb(92, 106, 128)
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font.clone(), text_col);
+    let width = (galley.size().x + 15.0_f32).ceil().max(42.0_f32);
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), sense);
+
+    if ui.is_rect_visible(rect) {
+        let hovered = enabled && resp.hovered();
+        let pressed = enabled && resp.is_pointer_button_down_on();
+        let bg = if !enabled {
+            Color32::from_rgb(15, 20, 31)
+        } else if pressed {
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 68)
+        } else if hovered {
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 38)
+        } else {
+            Color32::from_rgb(20, 27, 42)
+        };
+        let border = if !enabled {
+            Color32::from_rgb(27, 36, 52)
+        } else if hovered || pressed {
+            accent
+        } else {
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 105)
+        };
+
+        let r = CornerRadius::same(6);
+        ui.painter().rect_filled(rect, r, bg);
+        ui.painter()
+            .rect_stroke(rect, r, Stroke::new(1.0_f32, border), StrokeKind::Inside);
+        ui.painter()
+            .text(rect.center(), Align2::CENTER_CENTER, label, font, text_col);
+    }
+
+    if enabled && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+fn draw_selection_status_strip(
+    ui: &mut Ui,
+    selection_range: Option<(usize, usize)>,
+    sample_rate: u32,
+    solo_stem_active: bool,
+    out_action: &mut Option<TimelineEditAction>,
+) {
+    let cyan = Color32::from_rgb(56, 189, 248);
+    let amber = Color32::from_rgb(245, 158, 11);
+
+    if let Some((a, b)) = selection_range.filter(|&(x, y)| x.max(y) > x.min(y) + 16) {
+        let s0 = a.min(b);
+        let s1 = a.max(b);
+        let sr = sample_rate.max(1) as f64;
+        let t0 = s0 as f64 / sr;
+        let t1 = s1 as f64 / sr;
+        let dur = (s1 - s0) as f64 / sr;
+        let solo_suffix = if solo_stem_active {
+            "  •  Solo attivo"
+        } else {
+            ""
+        };
+        let readout = format!(
+            "Selezione: {} – {} (durata {:.1}s){}",
+            fmt_mm_ss_tenths(t0),
+            fmt_mm_ss_tenths(t1),
+            dur,
+            solo_suffix
+        );
+
+        ui.label(
+            egui::RichText::new(readout)
+                .size(11.3_f32)
+                .strong()
+                .color(if solo_stem_active { amber } else { cyan }),
+        );
+
+        if toolbar_action_pill(
+            ui,
+            "✕ Deseleziona",
+            true,
+            Color32::from_rgb(244, 63, 94),
+            22.0_f32,
+        )
+        .on_hover_text("Azzera la selezione corrente e disattiva il Loop (Tasto Esc)")
+        .clicked()
+        {
+            *out_action = Some(TimelineEditAction::ClearSelection);
+        }
+    } else {
+        ui.label(
+            egui::RichText::new(
+                "Trascina sulle tracce per selezionare una parte da tagliare o sfumare",
+            )
+            .size(11.2_f32)
+            .color(Color32::from_rgb(132, 148, 174)),
+        );
+    }
+}
+
+fn draw_audio_editing_toolbar(
+    ui: &mut Ui,
+    state: &SharedAudioState,
+    sample_rate: u32,
+    edit_ctx: TimelineEditContext,
+) -> Option<TimelineEditAction> {
+    let mut action = None;
+    let has_sel = state
+        .selection_range
+        .map(|(a, b)| a.max(b) > a.min(b) + 16)
+        .unwrap_or(false);
+    let solo_stem_active = state.mode == PlaybackSourceMode::FourStemMixer
+        && state.stems.is_some()
+        && state.stem_channels.iter().any(|c| c.solo);
+
+    let cyan = Color32::from_rgb(56, 189, 248);
+    let amber = Color32::from_rgb(245, 158, 11);
+    let emerald = Color32::from_rgb(52, 211, 153);
+    let violet = Color32::from_rgb(192, 132, 252);
+    let coral = Color32::from_rgb(251, 113, 133);
+
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(14, 19, 30))
+        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(31, 43, 65)))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            let bar_w = ui.available_width();
+            let single_row = bar_w >= 1640.0_f32;
+            let btn_h = 24.0_f32;
+
+            let draw_buttons = |ui: &mut Ui, act: &mut Option<TimelineEditAction>| {
+                ui.spacing_mut().item_spacing = Vec2::new(4.5_f32, 4.0_f32);
+
+                if toolbar_action_pill(ui, "✂ Taglia (Canc)", has_sel, coral, btn_h)
+                    .on_hover_text(
+                        "Taglia via la zona selezionata negli appunti con micro-crossfade da 8 ms\n\
+                         Scorciatoie: Canc / Backspace (elimina) oppure Ctrl+X (taglia negli appunti)",
+                    )
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::CutSelection);
+                }
+
+                if toolbar_action_pill(
+                    ui,
+                    "◰ Ritaglia Inizio/Fine (Ctrl+T)",
+                    has_sel,
+                    emerald,
+                    btn_h,
+                )
+                .on_hover_text(
+                    "Mantiene SOLO la parte selezionata eliminando chiacchiere prima e dopo il brano (Ctrl+T)\n\
+                     Applica automaticamente micro-fade anti-click da 5 ms su inizio e fine",
+                )
+                .clicked()
+                {
+                    *act = Some(TimelineEditAction::CropSelection);
+                }
+
+                if toolbar_action_pill(ui, "🔇 Silenzia Zona", has_sel, amber, btn_h)
+                    .on_hover_text(
+                        "Azzera morbidamente il volume nella selezione (rampe cosinusoidali 10 ms).\n\
+                         Funzione Smart Sala Prove: se uno Stem è in Solo, silenzia SOLO quello Stem!",
+                    )
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::SilenceSelection);
+                }
+
+                if toolbar_action_pill(ui, "📋 Copia", has_sel, cyan, btn_h)
+                    .on_hover_text("Copia la zona selezionata negli appunti Studio (Ctrl+C)")
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::CopySelection);
+                }
+
+                if toolbar_action_pill(ui, "📥 Incolla", edit_ctx.has_clipboard, cyan, btn_h)
+                    .on_hover_text(
+                        "Incolla gli appunti alla posizione attuale della testina con crossfade da 8 ms (Ctrl+V)\n\
+                         Suggerimento: usa Ctrl+D per duplicare al volo la selezione!",
+                    )
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::PasteAtPlayhead);
+                }
+
+                if toolbar_action_pill(ui, "◢ Fade In", true, violet, btn_h)
+                    .on_hover_text(
+                        "Applica una sfumatura d'ingresso S-curve musicale sulla selezione,\n\
+                         oppure sui primi 2.0 secondi del brano se non hai selezionato nulla",
+                    )
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::FadeIn);
+                }
+
+                if toolbar_action_pill(ui, "◣ Fade Out", true, violet, btn_h)
+                    .on_hover_text(
+                        "Applica una sfumatura d'uscita S-curve musicale sulla selezione,\n\
+                         oppure sugli ultimi 3.0 secondi del brano se non hai selezionato nulla",
+                    )
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::FadeOut);
+                }
+
+                if toolbar_action_pill(ui, "Normalizza", true, emerald, btn_h)
+                    .on_hover_text(
+                        "Normalizza a -1.0 dBFS la selezione o la traccia attiva\n\
+                         (utilissimo dopo tagli o silenziamenti; se uno Stem è in Solo, normalizza solo quello Stem!)",
+                    )
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::NormalizeSelection);
+                }
+
+                if toolbar_action_pill(ui, "↶ Annulla Edit", edit_ctx.can_undo_edit, cyan, btn_h)
+                    .on_hover_text("Annulla l'ultima modifica audio sulla timeline (Ctrl+Z)")
+                    .clicked()
+                {
+                    *act = Some(TimelineEditAction::UndoAudioEdit);
+                }
+
+                if toolbar_action_pill(
+                    ui,
+                    "↷ Ripristina Edit",
+                    edit_ctx.can_redo_edit,
+                    cyan,
+                    btn_h,
+                )
+                .on_hover_text("Ripristina la modifica audio annullata (Ctrl+Y)")
+                .clicked()
+                {
+                    *act = Some(TimelineEditAction::RedoAudioEdit);
+                }
+            };
+
+            if single_row {
+                ui.horizontal(|ui| {
+                    draw_buttons(ui, &mut action);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0_f32;
+                        if has_sel {
+                            if toolbar_action_pill(
+                                ui,
+                                "✕ Deseleziona",
+                                true,
+                                Color32::from_rgb(244, 63, 94),
+                                22.0_f32,
+                            )
+                            .on_hover_text("Azzera la selezione corrente e disattiva il Loop (Esc)")
+                            .clicked()
+                            {
+                                action = Some(TimelineEditAction::ClearSelection);
+                            }
+                            if let Some((a, b)) = state.selection_range {
+                                let s0 = a.min(b);
+                                let s1 = a.max(b);
+                                let sr = sample_rate.max(1) as f64;
+                                let solo_suffix = if solo_stem_active {
+                                    " • Solo attivo"
+                                } else {
+                                    ""
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Selezione: {} – {} (durata {:.1}s){}",
+                                        fmt_mm_ss_tenths(s0 as f64 / sr),
+                                        fmt_mm_ss_tenths(s1 as f64 / sr),
+                                        (s1 - s0) as f64 / sr,
+                                        solo_suffix
+                                    ))
+                                    .size(11.3_f32)
+                                    .strong()
+                                    .color(if solo_stem_active { amber } else { cyan }),
+                                );
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Trascina sulle tracce per selezionare una parte da tagliare o sfumare",
+                                )
+                                .size(11.2_f32)
+                                .color(Color32::from_rgb(132, 148, 174)),
+                            );
+                        }
+                    });
+                });
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    draw_buttons(ui, &mut action);
+                });
+                ui.add_space(3.0_f32);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0_f32;
+                    draw_selection_status_strip(
+                        ui,
+                        state.selection_range,
+                        sample_rate,
+                        solo_stem_active,
+                        &mut action,
+                    );
+                });
+            }
+        });
+
+    action
+}
+
+fn near_selection_edge_px(
+    hover_x: f32,
+    rect: Rect,
+    start_frame: usize,
+    vis_frames: usize,
+    selection_range: Option<(usize, usize)>,
+) -> Option<bool> {
+    let (a, b) = selection_range?;
+    let s0 = a.min(b);
+    let s1 = a.max(b);
+    if s1 <= s0 {
+        return None;
+    }
+    let end_frame = start_frame + vis_frames;
+    let tol = 7.5_f32;
+    if s0 >= start_frame && s0 <= end_frame {
+        let sx0 = frame_to_x(s0, rect, start_frame, vis_frames);
+        if (hover_x - sx0).abs() <= tol {
+            return Some(true); // Bordo sinistro
+        }
+    }
+    if s1 >= start_frame && s1 <= end_frame {
+        let sx1 = frame_to_x(s1, rect, start_frame, vis_frames);
+        if (hover_x - sx1).abs() <= tol {
+            return Some(false); // Bordo destro
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_range_selection_interaction(
+    ui: &mut Ui,
+    resp: &egui::Response,
+    rect: Rect,
+    start_frame: usize,
+    vis_frames: usize,
+    total_frames: usize,
+    activate_loop_on_create: bool,
+    position_frame: &mut usize,
+    selection_range: &mut Option<(usize, usize)>,
+    loop_enabled: &mut bool,
+    drag_state: &mut Option<SelectionDragKind>,
+    default_hover_cursor: egui::CursorIcon,
+) {
+    let near_edge = ui
+        .input(|i| i.pointer.hover_pos())
+        .filter(|p| rect.expand2(Vec2::new(6.0_f32, 0.0_f32)).contains(*p))
+        .and_then(|p| near_selection_edge_px(p.x, rect, start_frame, vis_frames, *selection_range));
+
+    if resp.double_clicked() {
+        *selection_range = None;
+        *loop_enabled = false;
+        *drag_state = None;
+        if let Some(pos) = resp.interact_pointer_pos() {
+            *position_frame = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
+        }
+    } else {
+        if resp.drag_started() {
+            let origin = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| resp.interact_pointer_pos());
+            if let Some(pos) = origin {
+                let edge_hit =
+                    near_selection_edge_px(pos.x, rect, start_frame, vis_frames, *selection_range);
+                match (edge_hit, *selection_range) {
+                    (Some(true), Some((a, b))) => {
+                        *drag_state = Some(SelectionDragKind::AdjustLeft {
+                            fixed_right: a.max(b),
+                        });
+                    }
+                    (Some(false), Some((a, b))) => {
+                        *drag_state = Some(SelectionDragKind::AdjustRight {
+                            fixed_left: a.min(b),
+                        });
+                    }
+                    _ => {
+                        let anchor = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
+                        *drag_state = Some(SelectionDragKind::Creating { anchor });
+                    }
+                }
+            }
+        }
+
+        if resp.dragged() {
+            if let (Some(kind), Some(pos)) = (*drag_state, resp.interact_pointer_pos()) {
+                let curr = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
+                let min_span = (vis_frames / 300).max(32);
+                match kind {
+                    SelectionDragKind::Creating { anchor } => {
+                        let lo = anchor.min(curr);
+                        let hi = anchor.max(curr);
+                        if hi >= lo + min_span {
+                            *selection_range = Some((lo, hi));
+                            if activate_loop_on_create {
+                                *loop_enabled = true;
+                            }
+                            *position_frame = lo;
+                        } else if activate_loop_on_create {
+                            *position_frame = curr;
+                        }
+                    }
+                    SelectionDragKind::AdjustLeft { fixed_right } => {
+                        let lo = curr.min(fixed_right.saturating_sub(min_span));
+                        let hi = fixed_right.max(lo + min_span).min(total_frames);
+                        *selection_range = Some((lo, hi));
+                        *position_frame = lo;
+                    }
+                    SelectionDragKind::AdjustRight { fixed_left } => {
+                        let lo = fixed_left.min(total_frames.saturating_sub(min_span));
+                        let hi = curr.max(lo + min_span).min(total_frames);
+                        *selection_range = Some((lo, hi));
+                    }
+                }
+            }
+        }
+
+        if resp.drag_stopped() {
+            *drag_state = None;
+        }
+
+        if resp.clicked() && !resp.double_clicked() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let clicked = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
+                let shift_held = ui.input(|i| i.modifiers.shift);
+                if shift_held {
+                    let (lo, hi) = if let Some((a, b)) = *selection_range {
+                        let s0 = a.min(b);
+                        let s1 = a.max(b);
+                        if clicked < s0 {
+                            (clicked, s1)
+                        } else {
+                            (s0, clicked)
+                        }
+                    } else {
+                        ((*position_frame).min(clicked), (*position_frame).max(clicked))
+                    };
+                    if hi > lo + 16 {
+                        *selection_range = Some((lo, hi));
+                        *position_frame = lo;
+                    }
+                } else {
+                    *position_frame = clicked;
+                }
+                *drag_state = None;
+            }
+        }
+    }
+
+    if resp.dragged() || (resp.hovered() && near_edge.is_some()) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(default_hover_cursor);
+    }
+}
+
+/// Disegna la Timeline Multi-Traccia stile Audacity 4 / Logic Pro / Moises.ai con Barra Editing Audio,
+/// righello adattivo, corsie separate per i 4 Stems Demucs (o traccia Stereo principale), controlli M/S/Volume/Pan,
+/// mini LED meter live, forme d'onda Peak + RMS, maniglie di selezione e playhead sincronizzato.
 pub fn draw_multitrack_timeline(
     ui: &mut egui::Ui,
     state: &mut SharedAudioState,
     tl: &mut TimelineState,
-) {
+    edit_ctx: TimelineEditContext,
+) -> Option<TimelineEditAction> {
     tl.zoom = tl.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     tl.scroll_norm = tl.scroll_norm.clamp(0.0_f32, 1.0_f32);
 
     let (total_frames, sample_rate) = active_timeline_metrics(state);
+    let mut triggered_action: Option<TimelineEditAction> = None;
 
     egui::Frame::NONE
         .fill(Color32::from_rgb(11, 15, 24))
@@ -82,6 +615,12 @@ pub fn draw_multitrack_timeline(
                 draw_empty_timeline_placeholder(ui, wave_w);
                 return;
             }
+
+            // 0. BARRA STRUMENTI EDITING AUDIO NON-DISTRUTTIVO
+            if let Some(act) = draw_audio_editing_toolbar(ui, state, sample_rate, edit_ctx) {
+                triggered_action = Some(act);
+            }
+            ui.add_space(4.5_f32);
 
             // Gestione input Zoom (Ctrl + rotellina / pinch) e Scroll orizzontale (Shift + rotellina / trackpad X)
             let timeline_hover_rect = Rect::from_min_size(
@@ -164,70 +703,20 @@ pub fn draw_multitrack_timeline(
                     ruler_wave_rect = r_rect;
                     last_wave_bottom = r_rect.bottom();
 
-                    if r_resp.double_clicked() {
-                        state.selection_range = None;
-                        state.loop_enabled = false;
-                        tl.ruler_drag_start = None;
-                    } else {
-                        if r_resp.drag_started() {
-                            let origin = ui
-                                .input(|i| i.pointer.press_origin())
-                                .or_else(|| r_resp.interact_pointer_pos());
-                            if let Some(pos) = origin {
-                                tl.ruler_drag_start = Some(x_to_frame(
-                                    pos.x,
-                                    r_rect,
-                                    start_frame,
-                                    vis_frames,
-                                    total_frames,
-                                ));
-                            }
-                        }
-                        if r_resp.dragged() {
-                            if let (Some(anchor), Some(pos)) =
-                                (tl.ruler_drag_start, r_resp.interact_pointer_pos())
-                            {
-                                let curr = x_to_frame(
-                                    pos.x,
-                                    r_rect,
-                                    start_frame,
-                                    vis_frames,
-                                    total_frames,
-                                );
-                                let lo = anchor.min(curr);
-                                let hi = anchor.max(curr);
-                                let min_span = (vis_frames / 260).max(32);
-                                if hi >= lo + min_span {
-                                    state.selection_range = Some((lo, hi));
-                                    state.loop_enabled = true;
-                                    state.position_frame = lo;
-                                } else {
-                                    state.position_frame = curr;
-                                }
-                            }
-                        }
-                        if r_resp.drag_stopped() {
-                            tl.ruler_drag_start = None;
-                        }
-                        if r_resp.clicked() && !r_resp.double_clicked() {
-                            if let Some(pos) = r_resp.interact_pointer_pos() {
-                                state.position_frame = x_to_frame(
-                                    pos.x,
-                                    r_rect,
-                                    start_frame,
-                                    vis_frames,
-                                    total_frames,
-                                );
-                                tl.ruler_drag_start = None;
-                            }
-                        }
-                    }
-
-                    if r_resp.dragged() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    } else if r_resp.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
+                    handle_range_selection_interaction(
+                        ui,
+                        &r_resp,
+                        r_rect,
+                        start_frame,
+                        vis_frames,
+                        total_frames,
+                        true,
+                        &mut state.position_frame,
+                        &mut state.selection_range,
+                        &mut state.loop_enabled,
+                        &mut tl.ruler_drag,
+                        egui::CursorIcon::PointingHand,
+                    );
 
                     let loop_active = state.loop_enabled;
                     major_tick_xs = draw_time_ruler(
@@ -244,9 +733,10 @@ pub fn draw_multitrack_timeline(
                         r_resp.on_hover_text(
                             "Righello Temporale\n\
                              • Clic singolo: sposta il cursore in quel punto\n\
+                             • Shift + Clic: estende la selezione fino al punto cliccato\n\
+                             • Trascina i bordi sinistro/destro: rifinisce al millimetro la selezione\n\
                              • Trascina sul righello: seleziona un intervallo e attiva il Loop (Tasto L)\n\
-                             • Doppio clic: azzera il Loop\n\
-                             • Ctrl + Rotellina: ingrandisci / riduci Zoom",
+                             • Doppio clic: azzera il Loop",
                         );
                     }
                 });
@@ -402,6 +892,8 @@ pub fn draw_multitrack_timeline(
                 }
             });
         });
+
+    triggered_action
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -724,12 +1216,23 @@ fn draw_time_ruler(
                 painter.rect_filled(top_strip, CornerRadius::ZERO, bar_col);
                 painter.line_segment(
                     [Pos2::new(sx0, rect.top()), Pos2::new(sx0, rect.bottom())],
-                    Stroke::new(1.2_f32, edge_col),
+                    Stroke::new(1.5_f32, edge_col),
                 );
                 painter.line_segment(
                     [Pos2::new(sx1, rect.top()), Pos2::new(sx1, rect.bottom())],
-                    Stroke::new(1.2_f32, edge_col),
+                    Stroke::new(1.5_f32, edge_col),
                 );
+                // Maniglie laterali visibili sul righello per trascinare inizio/fine selezione
+                let grip_l = Rect::from_min_max(
+                    Pos2::new(sx0, rect.top() + 2.0_f32),
+                    Pos2::new((sx0 + 4.5_f32).min(sx1), rect.top() + 12.0_f32),
+                );
+                let grip_r = Rect::from_min_max(
+                    Pos2::new((sx1 - 4.5_f32).max(sx0), rect.top() + 2.0_f32),
+                    Pos2::new(sx1, rect.top() + 12.0_f32),
+                );
+                painter.rect_filled(grip_l, CornerRadius::same(2), edge_col);
+                painter.rect_filled(grip_r, CornerRadius::same(2), edge_col);
                 if loop_enabled && (sx1 - sx0) > 46.0_f32 {
                     painter.text(
                         Pos2::new((sx0 + sx1) * 0.5_f32, rect.bottom() - 6.5_f32),
@@ -1308,50 +1811,25 @@ fn draw_waveform_lane(
 ) -> Rect {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(wave_w, lane_h), Sense::click_and_drag());
 
-    // Interazioni mouse sulla corsia: clic seek, drag selezione, doppio clic azzera
-    if resp.double_clicked() {
-        *selection_range = None;
+    // Interazioni mouse sulla corsia: clic seek, Shift+Clic estende, maniglie sinistro/destro regolabili, drag selezione
+    let mut dummy_loop_flag = false;
+    let had_selection_before = selection_range.is_some();
+    handle_range_selection_interaction(
+        ui,
+        &resp,
+        rect,
+        start_frame,
+        vis_frames,
+        total_frames,
+        false,
+        position_frame,
+        selection_range,
+        &mut dummy_loop_flag,
+        &mut tl.lane_drag,
+        egui::CursorIcon::Crosshair,
+    );
+    if had_selection_before && selection_range.is_none() {
         tl.drag_select_start = None;
-        if let Some(pos) = resp.interact_pointer_pos() {
-            *position_frame = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
-        }
-    } else {
-        if resp.drag_started() {
-            let origin = ui
-                .input(|i| i.pointer.press_origin())
-                .or_else(|| resp.interact_pointer_pos());
-            if let Some(pos) = origin {
-                let anchor = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
-                tl.drag_select_start = Some(anchor);
-            }
-        }
-        if resp.dragged() {
-            if let (Some(anchor), Some(pos)) = (tl.drag_select_start, resp.interact_pointer_pos()) {
-                let curr = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
-                let lo = anchor.min(curr);
-                let hi = anchor.max(curr);
-                let min_span = (vis_frames / 280).max(32);
-                if hi >= lo + min_span {
-                    *selection_range = Some((lo, hi));
-                    *position_frame = lo;
-                }
-            }
-        }
-        if resp.drag_stopped() {
-            tl.drag_select_start = None;
-        }
-        if resp.clicked() && !resp.double_clicked() {
-            if let Some(pos) = resp.interact_pointer_pos() {
-                *position_frame = x_to_frame(pos.x, rect, start_frame, vis_frames, total_frames);
-                tl.drag_select_start = None;
-            }
-        }
-    }
-
-    if resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-    } else if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     }
 
     if !ui.is_rect_visible(rect) {
@@ -1456,7 +1934,7 @@ fn draw_waveform_lane(
         }
     }
 
-    // Evidenziazione regione selezionata sulla corsia
+    // Evidenziazione regione selezionata sulla corsia con maniglie laterali stile DAW
     if let Some((a, b)) = *selection_range {
         let s0 = a.min(b);
         let s1 = a.max(b);
@@ -1472,16 +1950,38 @@ fn draw_waveform_lane(
                 painter.rect_filled(
                     sel_rect,
                     CornerRadius::ZERO,
-                    Color32::from_rgba_unmultiplied(56, 189, 248, 22),
+                    Color32::from_rgba_unmultiplied(56, 189, 248, 26),
                 );
-                painter.line_segment(
-                    [Pos2::new(sx0, rect.top()), Pos2::new(sx0, rect.bottom())],
-                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(125, 211, 252, 135)),
-                );
-                painter.line_segment(
-                    [Pos2::new(sx1, rect.top()), Pos2::new(sx1, rect.bottom())],
-                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(125, 211, 252, 135)),
-                );
+                let edge_col = Color32::from_rgba_unmultiplied(125, 211, 252, 200);
+                let cap_w = 5.5_f32.min((sx1 - sx0) * 0.45_f32);
+                if s0 >= start_frame {
+                    painter.line_segment(
+                        [Pos2::new(sx0, rect.top() + 1.0_f32), Pos2::new(sx0, rect.bottom() - 1.0_f32)],
+                        Stroke::new(1.5_f32, edge_col),
+                    );
+                    painter.line_segment(
+                        [Pos2::new(sx0, rect.top() + 2.0_f32), Pos2::new(sx0 + cap_w, rect.top() + 2.0_f32)],
+                        Stroke::new(2.0_f32, edge_col),
+                    );
+                    painter.line_segment(
+                        [Pos2::new(sx0, rect.bottom() - 2.0_f32), Pos2::new(sx0 + cap_w, rect.bottom() - 2.0_f32)],
+                        Stroke::new(2.0_f32, edge_col),
+                    );
+                }
+                if s1 <= end_frame {
+                    painter.line_segment(
+                        [Pos2::new(sx1, rect.top() + 1.0_f32), Pos2::new(sx1, rect.bottom() - 1.0_f32)],
+                        Stroke::new(1.5_f32, edge_col),
+                    );
+                    painter.line_segment(
+                        [Pos2::new(sx1 - cap_w, rect.top() + 2.0_f32), Pos2::new(sx1, rect.top() + 2.0_f32)],
+                        Stroke::new(2.0_f32, edge_col),
+                    );
+                    painter.line_segment(
+                        [Pos2::new(sx1 - cap_w, rect.bottom() - 2.0_f32), Pos2::new(sx1, rect.bottom() - 2.0_f32)],
+                        Stroke::new(2.0_f32, edge_col),
+                    );
+                }
             }
         }
     }

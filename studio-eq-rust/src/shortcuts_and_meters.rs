@@ -142,6 +142,14 @@ pub struct ShortcutActions {
     pub undo: bool,
     pub redo: bool,
     pub toggle_help: bool,
+    // Nuove scorciatoie Editing Audio Non-Distruttivo
+    pub delete_selection: bool,
+    pub cut_selection: bool,
+    pub copy_selection: bool,
+    pub paste_selection: bool,
+    pub crop_selection: bool,
+    pub duplicate_selection: bool,
+    pub clear_selection: bool,
 }
 
 /// Consuma la pressione singola (ignorando l'auto-repeat del sistema operativo) di un tasto senza modificatori.
@@ -185,7 +193,7 @@ fn consume_question_mark_text(i: &mut egui::InputState) -> bool {
 /// Intercetta le scorciatoie globali della DAW su ogni frame della GUI.
 pub fn poll_daw_shortcuts(ctx: &egui::Context) -> ShortcutActions {
     let mut actions = ShortcutActions::default();
-    let editing_text = ctx.output(|o| o.ime.is_some());
+    let editing_text = ctx.wants_keyboard_input() || ctx.output(|o| o.ime.is_some());
 
     ctx.input_mut(|i| {
         if consume_unmodified_single_press(i, Key::F1) {
@@ -200,6 +208,42 @@ pub fn poll_daw_shortcuts(ctx: &egui::Context) -> ShortcutActions {
             actions.toggle_help = true;
         }
 
+        // Cattura eventi Cut / Copy / Paste nativi di egui-winit su Windows + combinazioni Ctrl+X/C/V
+        let mut saw_cut = false;
+        let mut saw_copy = false;
+        let mut saw_paste = false;
+        i.events.retain(|ev| match ev {
+            Event::Cut => {
+                saw_cut = true;
+                false
+            }
+            Event::Copy => {
+                saw_copy = true;
+                false
+            }
+            Event::Paste(_) => {
+                saw_paste = true;
+                false
+            }
+            _ => true,
+        });
+
+        if saw_cut || i.consume_key(Modifiers::COMMAND, Key::X) {
+            actions.cut_selection = true;
+        }
+        if saw_copy || i.consume_key(Modifiers::COMMAND, Key::C) {
+            actions.copy_selection = true;
+        }
+        if saw_paste || i.consume_key(Modifiers::COMMAND, Key::V) {
+            actions.paste_selection = true;
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::T) {
+            actions.crop_selection = true;
+        }
+        if i.consume_key(Modifiers::COMMAND, Key::D) {
+            actions.duplicate_selection = true;
+        }
+
         // Ctrl+Y oppure Ctrl+Shift+Z -> Ripristina (Redo)
         if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
             || i.consume_key(Modifiers::COMMAND, Key::Y)
@@ -208,6 +252,15 @@ pub fn poll_daw_shortcuts(ctx: &egui::Context) -> ShortcutActions {
         } else if i.consume_key(Modifiers::COMMAND, Key::Z) {
             // Ctrl+Z -> Annulla (Undo)
             actions.undo = true;
+        }
+
+        if consume_unmodified_single_press(i, Key::Delete)
+            || consume_unmodified_single_press(i, Key::Backspace)
+        {
+            actions.delete_selection = true;
+        }
+        if consume_unmodified_single_press(i, Key::Escape) {
+            actions.clear_selection = true;
         }
 
         if consume_unmodified_single_press(i, Key::Space) {
@@ -462,7 +515,7 @@ pub fn draw_shortcuts_modal(ctx: &egui::Context, open: &mut bool) {
                     );
                     ui.add_space(4.0_f32);
 
-                    let shortcuts: [(&str, &str, &str, Color32); 10] = [
+                    let shortcuts: [(&str, &str, &str, Color32); 16] = [
                         (
                             "Spazio",
                             "Play / Pausa",
@@ -473,6 +526,42 @@ pub fn draw_shortcuts_modal(ctx: &egui::Context, open: &mut bool) {
                             "Home",
                             "Torna all'Inizio",
                             "Riporta subito il cursore all'inizio della canzone (00:00.0)",
+                            cyan_accent,
+                        ),
+                        (
+                            "Canc / Backspace",
+                            "Elimina Selezione",
+                            "Taglia via la zona evidenziata con micro-crossfade anti-click da 8 ms",
+                            amber_accent,
+                        ),
+                        (
+                            "Ctrl + X",
+                            "Taglia negli Appunti",
+                            "Taglia la selezione su tutte le tracce e la salva negli appunti Studio",
+                            amber_accent,
+                        ),
+                        (
+                            "Ctrl + C / V",
+                            "Copia / Incolla",
+                            "Copia la selezione e la incolla alla posizione della testina (crossfade 8 ms)",
+                            cyan_accent,
+                        ),
+                        (
+                            "Ctrl + T",
+                            "Ritaglia Inizio/Fine",
+                            "Mantiene SOLO la selezione eliminando chiacchiere iniziali e finali",
+                            emerald_accent,
+                        ),
+                        (
+                            "Ctrl + D",
+                            "Duplica Selezione",
+                            "Duplica subito dopo il tratto selezionato (es. raddoppio ritornello)",
+                            violet_accent,
+                        ),
+                        (
+                            "Esc",
+                            "Deseleziona Zona",
+                            "Rimuove la selezione corrente sulla timeline e disattiva il Loop",
                             cyan_accent,
                         ),
                         (
@@ -508,13 +597,13 @@ pub fn draw_shortcuts_modal(ctx: &egui::Context, open: &mut bool) {
                         (
                             "Ctrl + Z",
                             "Annulla (Undo)",
-                            "Torna indietro alla regolazione precedente (fino a 40 modifiche)",
+                            "Annulla l'ultima modifica Audio o EQ (storico fino a 15 edit audio / 40 EQ)",
                             cyan_accent,
                         ),
                         (
                             "Ctrl + Y",
                             "Ripristina (Redo)",
-                            "Riapplica una modifica annullata con Ctrl+Z",
+                            "Riapplica una modifica Audio o EQ annullata con Ctrl+Z",
                             cyan_accent,
                         ),
                         (
