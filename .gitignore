@@ -1,0 +1,20 @@
+# Rust build artifacts
+studio-eq-rust/target/
+target/
+
+# Python virtual environments & cache
+.venv/
+__pycache__/
+*.pyc
+
+# Large raw / uncompressed audio renders (>50MB WAVs)
+output/*.wav
+output/stems_raw/
+output/stems_studio/*.wav
+
+output/*.mp3
+output/stems_studio/*.mp3
+output/ai_master_report.json
+dist/
+*.dmg
+

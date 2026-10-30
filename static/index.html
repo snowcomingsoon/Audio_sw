@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Studio EQ & Sala Prove Mastering Suite</title>
+  <style>
+    :root {
+      --bg: #0d1017;
+      --panel: #151a24;
+      --panel-border: #252e42;
+      --accent: #38bdf8;
+      --accent-2: #a855f7;
+      --success: #22c55e;
+      --warn: #f59e0b;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 20px;
+      line-height: 1.45;
+    }
+    .container { max-width: 1260px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 16px 22px;
+      margin-bottom: 18px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .title-group h1 {
+      font-size: 1.28rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .badge {
+      font-size: 0.72rem;
+      background: rgba(56, 189, 248, 0.14);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .title-group p { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+    .downloads { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 15px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      border: 1px solid var(--panel-border);
+      background: #1e2636;
+      color: var(--text);
+      transition: all 0.15s ease;
+    }
+    .btn:hover { border-color: var(--accent); background: #243047; }
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      border-color: #38bdf8;
+      color: #fff;
+    }
+    .btn-success {
+      background: linear-gradient(135deg, #16a34a, #059669);
+      border-color: #4ade80;
+      color: #fff;
+    }
+    .grid-top {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    @media (max-width: 960px) { .grid-top { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .card-header h2 { font-size: 0.96rem; font-weight: 600; color: #e2e8f0; }
+    canvas#spectrumCanvas {
+      width: 100%;
+      height: 310px;
+      background: #090c12;
+      border-radius: 8px;
+      border: 1px solid #1e293b;
+      display: block;
+    }
+    .transport-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--panel-border);
+      flex-wrap: wrap;
+    }
+    .mode-switch {
+      display: inline-flex;
+      background: #0b0e15;
+      padding: 4px;
+      border-radius: 8px;
+      border: 1px solid var(--panel-border);
+    }
+    .mode-btn {
+      padding: 7px 13px;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .mode-btn.active {
+      background: var(--accent);
+      color: #090d16;
+    }
+    .diagnostic-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      font-size: 0.83rem;
+    }
+    .diagnostic-item {
+      background: #10141d;
+      border: 1px solid #1f293d;
+      border-radius: 8px;
+      padding: 9px 12px;
+    }
+    .diagnostic-item strong { color: var(--accent); display: block; margin-bottom: 2px; }
+    .eq-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .eq-strip {
+      background: #0f131c;
+      border: 1px solid #1e2738;
+      border-radius: 10px;
+      padding: 12px 10px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    .eq-strip .freq-title { font-weight: 700; font-size: 0.86rem; color: var(--accent); }
+    .eq-strip .role-desc { font-size: 0.72rem; color: var(--muted); min-height: 30px; }
+    .eq-strip input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .eq-strip .val-badge {
+      font-family: monospace;
+      font-size: 0.8rem;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: #1a2232;
+      color: #f8fafc;
+    }
+    .status-toast {
+      margin-top: 10px;
+      font-size: 0.84rem;
+      color: var(--success);
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="title-group">
+        <h1>
+          🎛️ Studio Parametric EQ & Sala Prove Restorer
+          <span class="badge">DSP 64-Bit + Live FFT</span>
+        </h1>
+        <p>Calibrato sull'analisi spettrale di <code>WhatsApp_Audio_2026-10-29_at_19.32.57.mpeg</code> (Logic Pro X • 4:29 • 44.1 kHz)</p>
+      </div>
+      <div class="downloads">
+        <a class="btn btn-success" href="/output/traccia_equalizzata_studio_master.wav" download>
+          ⬇️ Scarica Master WAV (24-bit Studio)
+        </a>
+        <a class="btn btn-primary" href="/output/traccia_equalizzata_studio_master.mp3" download>
+          ⬇️ Scarica Master MP3 (320 kbps)
+        </a>
+      </div>
+    </header>
+
+    <div class="grid-top">
+      <div class="card">
+        <div class="card-header">
+          <h2>Analizzatore di Spettro FFT & Curva Parametric EQ (20 Hz – 20 kHz)</h2>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" onclick="applyPreset('sala_prove')">Preset: Sala Prove Fix</button>
+            <button class="btn" onclick="applyPreset('vocal_up')">Preset: Voce in Primo Piano</button>
+            <button class="btn" onclick="applyPreset('flat')">Flat (0 dB)</button>
+          </div>
+        </div>
+        <canvas id="spectrumCanvas" width="820" height="310"></canvas>
+
+        <div class="transport-bar">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <button class="btn btn-primary" id="playPauseBtn" onclick="togglePlay()">▶️ Riproduci / Pausa</button>
+            <span id="timeDisplay" style="font-family:monospace; font-size:0.88rem; color:var(--muted);">00:00 / 04:29</span>
+          </div>
+
+          <div class="mode-switch">
+            <button class="mode-btn" id="modeOrig" onclick="setListeningMode('orig')">A: Originale (Sala)</button>
+            <button class="mode-btn active" id="modeLive" onclick="setListeningMode('live')">B: Live EQ Interattivo</button>
+            <button class="mode-btn" id="modeMaster" onclick="setListeningMode('master')">C: Master 64-Bit Completo</button>
+          </div>
+        </div>
+        <input type="range" id="seekBar" min="0" max="269" step="0.1" value="0" style="width:100%; margin-top:10px; accent-color:var(--accent);" />
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Diagnosi Acustica Rilevata</h2>
+        </div>
+        <ul class="diagnostic-list">
+          <li class="diagnostic-item">
+            <strong>🔴 Rimbombo Modale (113 Hz & 164 Hz)</strong>
+            Picco anomalo di +45.6 dB a 164.2 Hz che impasta basso, cassa e chitarre. Corretto con notch parametrici (-3.2 dB e -6.2 dB) + Dynamic EQ.
+          </li>
+          <li class="diagnostic-item">
+            <strong>🟠 Effetto "Scatola" (495 Hz)</strong>
+            Risonanza delle pareti della sala a 495.3 Hz (+40.7 dB). Tagliata di -5.2 dB (Q=2.0) per pulire il centro del mix.
+          </li>
+          <li class="diagnostic-item">
+            <strong>🟢 Buco Voce & Rullante (1–2 kHz)</strong>
+            La banda 1–2 kHz scendeva a 17.9 dB (-20 dB rispetto ai medio-bassi!). Recuperata con +5.4 dB a 1.42 kHz.
+          </li>
+          <li class="diagnostic-item">
+            <strong>🔵 Carenza di Aria (> 8 kHz a -3.3 dB)</strong>
+            Suono cupo/ovattato sulle alte. Ripristinato con High-Shelf +7.8 dB @ 8.2 kHz + Harmonic Air Exciter.
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2>Controlli Parametrici a 8 Bande + Motore di Esportazione DSP Python</h2>
+        <button class="btn btn-primary" onclick="renderServerMaster()">⚡ Ricalcola Master 64-Bit con questi parametri</button>
+      </div>
+      <div class="eq-grid" id="eqSlidersContainer"></div>
+      <div class="status-toast" id="renderStatus"></div>
+    </div>
+  </div>
+
+  <!-- Doppio player sincronizzato per confronto A/B/C istantaneo -->
+  <audio id="audioOrig" src="/output/traccia_originale_sala.mp3" preload="auto" crossorigin="anonymous"></audio>
+  <audio id="audioMaster" src="/output/traccia_equalizzata_studio_master.mp3" preload="auto" crossorigin="anonymous"></audio>
+
+  <script>
+    const BANDS = [
+      { freq: 113, type: 'peaking', q: 2.6, gain: -3.2, name: '113 Hz', desc: 'Risonanza Basso' },
+      { freq: 164, type: 'peaking', q: 1.5, gain: -6.2, name: '164 Hz', desc: 'Rimbombo Sala (Mud)' },
+      { freq: 265, type: 'peaking', q: 1.4, gain: -3.0, name: '265 Hz', desc: 'Pulizia Medio-Bassi' },
+      { freq: 495, type: 'peaking', q: 2.0, gain: -5.2, name: '495 Hz', desc: 'Anti-Scatola (Box)' },
+      { freq: 1420, type: 'peaking', q: 0.85, gain: 5.4, name: '1.42 kHz', desc: 'Voce & Chitarre' },
+      { freq: 2336, type: 'peaking', q: 3.4, gain: -2.4, name: '2.34 kHz', desc: 'Taglio Acidità Mic' },
+      { freq: 4800, type: 'peaking', q: 1.0, gain: 4.8, name: '4.8 kHz', desc: 'Attacco & Presenza' },
+      { freq: 8200, type: 'highshelf', q: 0.707, gain: 7.8, name: '8.2 kHz', desc: 'Brillantezza / Air' }
+    ];
+
+    const PRESETS = {
+      sala_prove: [-3.2, -6.2, -3.0, -5.2, 5.4, -2.4, 4.8, 7.8],
+      vocal_up:   [-3.8, -7.0, -3.5, -5.5, 6.8, -2.0, 5.8, 8.2],
+      flat:       [0, 0, 0, 0, 0, 0, 0, 0]
+    };
+
+    let audioCtx = null;
+    let analyser = null;
+    let biquadNodes = [];
+    let currentMode = 'live'; // 'orig' | 'live' | 'master'
+    let isPlaying = false;
+
+    const audioOrig = document.getElementById('audioOrig');
+    const audioMaster = document.getElementById('audioMaster');
+    const seekBar = document.getElementById('seekBar');
+    const timeDisplay = document.getElementById('timeDisplay');
+
+    function buildSliders() {
+      const container = document.getElementById('eqSlidersContainer');
+      container.innerHTML = '';
+      BANDS.forEach((b, idx) => {
+        const div = document.createElement('div');
+        div.className = 'eq-strip';
+        div.innerHTML = `
+          <div class="freq-title">${b.name}</div>
+          <div class="role-desc">${b.desc}</div>
+          <input type="range" min="-12" max="12" step="0.2" value="${b.gain}" id="slider_${idx}" oninput="updateBand(${idx}, this.value)" />
+          <div class="val-badge" id="val_${idx}">${b.gain > 0 ? '+' + b.gain : b.gain} dB</div>
+          <div style="font-size:0.7rem; color:#64748b;">Q: ${b.q}</div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function initWebAudio() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const srcOrig = audioCtx.createMediaElementSource(audioOrig);
+      const srcMaster = audioCtx.createMediaElementSource(audioMaster);
+
+      // Highpass 45 Hz fisso per pulire i sub
+      const hp = audioCtx.createBiquadFilter();
+      hp.type = 'highpass';
+      hp.frequency.value = 45;
+
+      let prev = hp;
+      srcOrig.connect(hp);
+
+      biquadNodes = BANDS.map(b => {
+        const f = audioCtx.createBiquadFilter();
+        f.type = b.type;
+        f.frequency.value = b.freq;
+        f.Q.value = b.q;
+        f.gain.value = (currentMode === 'orig') ? 0 : b.gain;
+        prev.connect(f);
+        prev = f;
+        return f;
+      });
+
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 4096;
+      analyser.smoothingTimeConstant = 0.82;
+
+      prev.connect(analyser);
+      srcMaster.connect(analyser);
+      analyser.connect(audioCtx.destination);
+      syncMuteState();
+    }
+
+    function updateBand(idx, val) {
+      const num = parseFloat(val);
+      BANDS[idx].gain = num;
+      document.getElementById(`val_${idx}`).textContent = (num > 0 ? '+' + num.toFixed(1) : num.toFixed(1)) + ' dB';
+      if (biquadNodes[idx] && currentMode === 'live') {
+        biquadNodes[idx].gain.value = num;
+      }
+    }
+
+    function applyPreset(name) {
+      const vals = PRESETS[name];
+      if (!vals) return;
+      vals.forEach((v, i) => {
+        document.getElementById(`slider_${i}`).value = v;
+        updateBand(i, v);
+      });
+      if (currentMode === 'master') setListeningMode('live');
+    }
+
+    function syncMuteState() {
+      if (currentMode === 'master') {
+        audioOrig.muted = true;
+        audioMaster.muted = false;
+      } else {
+        audioOrig.muted = false;
+        audioMaster.muted = true;
+        biquadNodes.forEach((node, idx) => {
+          node.gain.value = (currentMode === 'orig') ? 0 : BANDS[idx].gain;
+        });
+      }
+    }
+
+    function setListeningMode(mode) {
+      currentMode = mode;
+      document.getElementById('modeOrig').classList.toggle('active', mode === 'orig');
+      document.getElementById('modeLive').classList.toggle('active', mode === 'live');
+      document.getElementById('modeMaster').classList.toggle('active', mode === 'master');
+      if (Math.abs(audioOrig.currentTime - audioMaster.currentTime) > 0.08) {
+        audioMaster.currentTime = audioOrig.currentTime;
+      }
+      syncMuteState();
+    }
+
+    function togglePlay() {
+      initWebAudio();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      if (!isPlaying) {
+        audioMaster.currentTime = audioOrig.currentTime;
+        audioOrig.play();
+        audioMaster.play();
+        isPlaying = true;
+        document.getElementById('playPauseBtn').textContent = '⏸️ Pausa';
+      } else {
+        audioOrig.pause();
+        audioMaster.pause();
+        isPlaying = false;
+        document.getElementById('playPauseBtn').textContent = '▶️ Riproduci / Pausa';
+      }
+    }
+
+    seekBar.addEventListener('input', () => {
+      const t = parseFloat(seekBar.value);
+      audioOrig.currentTime = t;
+      audioMaster.currentTime = t;
+    });
+
+    function fmtTime(sec) {
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    }
+
+    audioOrig.addEventListener('timeupdate', () => {
+      seekBar.value = audioOrig.currentTime;
+      timeDisplay.textContent = `${fmtTime(audioOrig.currentTime)} / ${fmtTime(audioOrig.duration || 269)}`;
+    });
+
+    async function renderServerMaster() {
+      const toast = document.getElementById('renderStatus');
+      toast.style.display = 'block';
+      toast.textContent = '⏳ Elaborazione DSP a 64-bit + Dynamic EQ + Mid/Side in corso...';
+      const eqPayload = [
+        { type: 'highpass', freq: 45.0, gain_db: 0.0, q: 0.707 },
+        { type: 'highpass', freq: 45.0, gain_db: 0.0, q: 0.707 },
+        ...BANDS.map(b => ({ type: b.type, freq: b.freq, gain_db: b.gain, q: b.q }))
+      ];
+      const res = await fetch('/api/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eq_bands: eqPayload })
+      });
+      const data = await res.json();
+      if (data.status === 'ok') {
+        toast.innerHTML = `✅ Master completato! RMS: <b>${data.stats.after.rms_db} dB</b> | Peak: <b>${data.stats.after.peak_db} dB</b> — <a href="${data.wav_url}" download style="color:#38bdf8;">Scarica WAV Custom</a> | <a href="${data.mp3_url}" download style="color:#38bdf8;">Scarica MP3 Custom</a>`;
+      }
+    }
+
+    // Disegno Canvas: Griglia Logaritmica + Spettro FFT + Curva EQ
+    const canvas = document.getElementById('spectrumCanvas');
+    const ctx = canvas.getContext('2d');
+
+    function freqToX(f, w) {
+      const minLog = Math.log10(20);
+      const maxLog = Math.log10(20000);
+      return ((Math.log10(f) - minLog) / (maxLog - minLog)) * w;
+    }
+
+    function dbToY(db, h) {
+      // Range -15 dB a +15 dB per la curva EQ
+      const mid = h / 2;
+      return mid - (db / 15) * (h * 0.42);
+    }
+
+    function drawLoop() {
+      requestAnimationFrame(drawLoop);
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      // Griglia frequenze
+      ctx.strokeStyle = '#192234';
+      ctx.lineWidth = 1;
+      [30, 60, 113, 164, 250, 495, 1000, 1420, 2336, 4800, 8200, 16000].forEach(f => {
+        const x = freqToX(f, w);
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, h);
+        ctx.stroke();
+        ctx.fillStyle = '#475569';
+        ctx.font = '10px monospace';
+        ctx.fillText(f >= 1000 ? (f/1000)+'k' : f+'', x + 3, h - 8);
+      });
+
+      // Linea 0 dB
+      ctx.strokeStyle = '#334155';
+      ctx.beginPath();
+      ctx.moveTo(0, h / 2);
+      ctx.lineTo(w, h / 2);
+      ctx.stroke();
+
+      // Spettro FFT in tempo reale
+      if (analyser) {
+        const bufLen = analyser.frequencyBinCount;
+        const data = new Uint8Array(bufLen);
+        analyser.getByteFrequencyData(data);
+        const sr = audioCtx.sampleRate;
+
+        ctx.beginPath();
+        ctx.moveTo(0, h);
+        for (let i = 1; i < bufLen; i++) {
+          const f = (i * sr) / (analyser.fftSize);
+          if (f < 20 || f > 20000) continue;
+          const x = freqToX(f, w);
+          const y = h - (data[i] / 255) * (h * 0.88);
+          ctx.lineTo(x, y);
+        }
+        ctx.lineTo(w, h);
+        ctx.closePath();
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0, 'rgba(56, 189, 248, 0.36)');
+        grad.addColorStop(1, 'rgba(56, 189, 248, 0.02)');
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+
+      // Curva di risposta EQ
+      ctx.beginPath();
+      for (let x = 0; x < w; x += 2) {
+        const logF = Math.log10(20) + (x / w) * (Math.log10(20000) - Math.log10(20));
+        const f = Math.pow(10, logF);
+        let totalDb = 0;
+        // Highpass 45 Hz
+        if (f < 90) {
+          totalDb -= 12 * Math.max(0, Math.log2(45 / Math.max(f, 10)));
+        }
+        if (currentMode !== 'orig') {
+          BANDS.forEach(b => {
+            if (b.type === 'peaking') {
+              const octDist = Math.log2(f / b.freq);
+              const bw = 1.0 / b.q;
+              totalDb += b.gain * Math.exp(-0.5 * Math.pow(octDist / (bw * 0.55), 2));
+            } else if (b.type === 'highshelf') {
+              const s = 1 / (1 + Math.exp(-4 * Math.log2(f / b.freq)));
+              totalDb += b.gain * s;
+            }
+          });
+        }
+        const y = dbToY(totalDb, h);
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = currentMode === 'orig' ? '#64748b' : '#38bdf8';
+      ctx.lineWidth = 2.8;
+      ctx.stroke();
+
+      // Punti nodali delle 8 bande
+      if (currentMode !== 'orig') {
+        BANDS.forEach(b => {
+          const x = freqToX(b.freq, w);
+          const y = dbToY(b.gain, h);
+          ctx.beginPath();
+          ctx.arc(x, y, 5, 0, Math.PI * 2);
+          ctx.fillStyle = b.gain < 0 ? '#f59e0b' : '#22c55e';
+          ctx.fill();
+        });
+      }
+    }
+
+    buildSliders();
+    drawLoop();
+  </script>
+</body>
+</html>

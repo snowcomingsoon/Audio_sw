@@ -1,0 +1,67 @@
+name: Build macOS Apple Silicon M1 DMG
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-m1-dmg:
+    name: macOS Apple Silicon M1 (arm64) App & DMG
+    runs-on: macos-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain (Apple Silicon arm64)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: studio-eq-rust
+
+      - name: Build StudioEQ Master Pro.app & Native M1 DMG
+        run: bash macos/build_macos_m1_dmg.sh
+
+      - name: Upload macOS M1 DMG Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StudioEQ_Master_Pro_macOS_M1_arm64
+          path: StudioEQ_Master_Pro_macOS_M1_arm64.dmg
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish macOS M1 DMG to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-m1
+          target_commitish: ${{ github.sha }}
+          name: "StudioEQ Master Pro v1.0.0 — macOS Apple Silicon (M1/M2/M3/M4)"
+          draft: false
+          prerelease: false
+          make_latest: true
+          body: |
+            ## StudioEQ Master Pro v1.0.0 — Installer Nativo macOS Apple Silicon (`arm64` M1 / M2 / M3 / M4)
+
+            ### Download Diretto
+            Scarica **`StudioEQ_Master_Pro_macOS_M1_arm64.dmg`** nella sezione **Assets** qui sotto.
+
+            ### Installazione Rapida su Mac con Chip M1 / M2 / M3 / M4
+            1. Apri il file **`StudioEQ_Master_Pro_macOS_M1_arm64.dmg`**.
+            2. Trascina **`StudioEQ Master Pro.app`** nella cartella **`Applications`**.
+            3. **Primo avvio (Gatekeeper macOS):** poiché il pacchetto usa firma locale nativa *ad-hoc* (`arm64`) senza notarizzazione Apple Developer a pagamento, se macOS mostra un avviso di sicurezza al primo avvio apri **Terminale** ed esegui:
+               ```bash
+               xattr -cr "/Applications/StudioEQ Master Pro.app"
+               ```
+               oppure fai **Ctrl + Clic (Tasto Destro) → Apri** su `StudioEQ Master Pro.app` in `/Applications`.
+          files: |
+            StudioEQ_Master_Pro_macOS_M1_arm64.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

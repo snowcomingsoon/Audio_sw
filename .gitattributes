@@ -1,0 +1,16 @@
+# Ensure macOS scripts, Apple Property Lists, and CI workflows always keep Unix LF line endings
+*.sh      text eol=lf
+*.command text eol=lf
+*.plist   text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+
+# Windows batch scripts keep CRLF
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# Binary assets
+*.icns    binary
+*.ico     binary
+*.dmg     binary
+*.exe     binary

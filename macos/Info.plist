@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>StudioEQ Master Pro</string>
+    <key>CFBundleDisplayName</key>
+    <string>StudioEQ Master Pro</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.studioeq.masterpro</string>
+    <key>CFBundleExecutable</key>
+    <string>StudioEQ_Master_Pro</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.music</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>LSRequiresNativeExecution</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Accesso audio per monitoraggio ed elaborazione in tempo reale.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>© 2026 StudioEQ Master Pro. Tutti i diritti riservati.</string>
+</dict>
+</plist>
