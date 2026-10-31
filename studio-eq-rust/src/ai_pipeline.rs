@@ -79,6 +79,10 @@ pub struct AiMasterReport {
     pub effective_bpm: Option<f32>,
     pub kicks: Option<u32>,
     pub snares: Option<u32>,
+    pub toms: Option<u32>,
+    pub double_pedal_strokes: Option<u32>,
+    pub fast_roll_strokes: Option<u32>,
+    pub quality_score: Option<f32>,
 }
 
 impl AiMasterReport {
@@ -94,11 +98,24 @@ impl AiMasterReport {
                 parts.push(format!("{bpm:.1} BPM"));
             }
         }
-        match (self.kicks, self.snares) {
-            (Some(k), Some(s)) if k > 0 || s > 0 => {
+        match (self.kicks, self.snares, self.toms) {
+            (Some(k), Some(s), Some(t)) if t > 0 => {
+                parts.push(format!("Cassa: {k} | Rullante: {s} | Tom: {t}"));
+            }
+            (Some(k), Some(s), _) if k > 0 || s > 0 => {
                 parts.push(format!("Cassa: {k} | Rullante: {s}"));
             }
             _ => {}
+        }
+        if let Some(dp) = self.double_pedal_strokes {
+            if dp > 0 {
+                parts.push(format!("Doppio Pedale: {dp}"));
+            }
+        }
+        if let Some(q) = self.quality_score {
+            if q.is_finite() && q > 0.0 {
+                parts.push(format!("Qualità AI: {q:.0}/100"));
+            }
         }
         if parts.is_empty() {
             None
@@ -114,11 +131,21 @@ pub fn parse_ai_master_report(json_text: &str) -> AiMasterReport {
         .or_else(|| extract_json_f32(json_text, "detected_bpm"));
     let kicks = extract_json_f32(json_text, "kicks").map(|v| v.max(0.0).round() as u32);
     let snares = extract_json_f32(json_text, "snares").map(|v| v.max(0.0).round() as u32);
+    let toms = extract_json_f32(json_text, "toms").map(|v| v.max(0.0).round() as u32);
+    let double_pedal_strokes =
+        extract_json_f32(json_text, "double_pedal_strokes").map(|v| v.max(0.0).round() as u32);
+    let fast_roll_strokes =
+        extract_json_f32(json_text, "fast_roll_strokes").map(|v| v.max(0.0).round() as u32);
+    let quality_score = extract_json_f32(json_text, "score_0_100");
     AiMasterReport {
         detected_key,
         effective_bpm,
         kicks,
         snares,
+        toms,
+        double_pedal_strokes,
+        fast_roll_strokes,
+        quality_score,
     }
 }
 
@@ -365,9 +392,11 @@ impl AiPipelineController {
             let cfg_path = out_dir.join("ai_pipeline_options.json");
             let _ = std::fs::write(&cfg_path, options.to_json_pretty());
 
-            // Rimuove la cache raw solo quando l'utente forza esplicitamente la ri-separazione AI
+            // Rimuove la cache raw/drumsep/6s solo quando l'utente forza esplicitamente la ri-separazione AI
             if options.force_reseparate {
                 let _ = std::fs::remove_dir_all(out_dir.join("stems_raw"));
+                let _ = std::fs::remove_dir_all(out_dir.join("stems_drumsep"));
+                let _ = std::fs::remove_dir_all(out_dir.join("stems_6s"));
             }
 
             let enriched_path = build_enriched_path(&py_exe);

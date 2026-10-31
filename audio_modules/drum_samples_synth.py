@@ -87,6 +87,32 @@ STUDIO_SAMPLE_FILES_RR2 = {
     },
 }
 
+STUDIO_SNARE_ROLL_RR = {
+    3: {
+        "soft": "snare_studio_soft_rr3.wav",
+        "med": "snare_studio_med_rr3.wav",
+        "hard": "snare_studio_hard_rr3.wav",
+    },
+    4: {
+        "soft": "snare_studio_soft_rr4.wav",
+        "med": "snare_studio_med_rr4.wav",
+        "hard": "snare_studio_hard_rr4.wav",
+    },
+}
+
+STUDIO_TOM_FILES = {
+    1: {
+        "high": "tom_studio_high.wav",
+        "mid": "tom_studio_mid.wav",
+        "floor": "tom_studio_floor.wav",
+    },
+    2: {
+        "high": "tom_studio_high_rr2.wav",
+        "mid": "tom_studio_mid_rr2.wav",
+        "floor": "tom_studio_floor_rr2.wav",
+    },
+}
+
 # CC0 1.0 Public Domain multi-mic studio drum sessions on GitHub
 VIRTUOSITY_CC0_BASE = "https://raw.githubusercontent.com/sfzinstruments/virtuosity_drums/master/Samples"
 FRANKENSNARE_CC0_BASE = "https://raw.githubusercontent.com/sfzinstruments/karoryfer.frankensnare/master/Samples"
@@ -145,6 +171,18 @@ CC0_STUDIO_PACK_MAP: dict[str, dict[str, dict[int, dict[str, tuple[str, str] | N
                 "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl4_rr2.flac"),
                 "extra": None,
             },
+            3: {
+                "close": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_center_vl10.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl10.flac"),
+                "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl4_rr3.flac"),
+                "extra": None,
+            },
+            4: {
+                "close": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_center_vl14.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl14.flac"),
+                "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl4_rr4.flac"),
+                "extra": None,
+            },
         },
         "med": {
             1: {
@@ -157,6 +195,18 @@ CC0_STUDIO_PACK_MAP: dict[str, dict[str, dict[int, dict[str, tuple[str, str] | N
                 "close": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_center_vl26.flac"),
                 "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl26.flac"),
                 "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl8_rr2.flac"),
+                "extra": None,
+            },
+            3: {
+                "close": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_center_vl22.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl22.flac"),
+                "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl8_rr3.flac"),
+                "extra": None,
+            },
+            4: {
+                "close": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_center_vl28.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl28.flac"),
+                "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl8_rr4.flac"),
                 "extra": None,
             },
         },
@@ -172,6 +222,50 @@ CC0_STUDIO_PACK_MAP: dict[str, dict[str, dict[int, dict[str, tuple[str, str] | N
                 "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl36.flac"),
                 "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl11_rr2.flac"),
                 "extra": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_rimshot_vl12.flac"),
+            },
+            3: {
+                "close": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_center_vl33.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl33.flac"),
+                "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl11_rr3.flac"),
+                "extra": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_rimshot_vl9.flac"),
+            },
+            4: {
+                "close": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_center_vl37.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/snare/oh_snare_center_vl37.flac"),
+                "btm": (FRANKENSNARE_CC0_BASE, "14p_basic/btm/sn_vl11_rr4.flac"),
+                "extra": (VIRTUOSITY_CC0_BASE, "snaremic/snare/snaremic_snare_rimshot_vl11.flac"),
+            },
+        },
+    },
+    "tom": {
+        "high": {
+            1: {
+                "close": (VIRTUOSITY_CC0_BASE, "mid/htom/mid_htom_center_vl3.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/htom/oh_htom_center_vl3.flac"),
+            },
+            2: {
+                "close": (VIRTUOSITY_CC0_BASE, "mid/htom/mid_htom_center_vl4.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/htom/oh_htom_center_vl4.flac"),
+            },
+        },
+        "mid": {
+            1: {
+                "close": (VIRTUOSITY_CC0_BASE, "mid/htom/mid_htom_center_vl4.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/htom/oh_htom_center_vl4.flac"),
+            },
+            2: {
+                "close": (VIRTUOSITY_CC0_BASE, "mid/ltom/mid_ltom_center_vl3.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/ltom/oh_ltom_center_vl3.flac"),
+            },
+        },
+        "floor": {
+            1: {
+                "close": (VIRTUOSITY_CC0_BASE, "mid/ltom/mid_ltom_center_vl4.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/ltom/oh_ltom_center_vl4.flac"),
+            },
+            2: {
+                "close": (VIRTUOSITY_CC0_BASE, "mid/ltom/mid_ltom_center_vl5.flac"),
+                "oh": (VIRTUOSITY_CC0_BASE, "oh/ltom/oh_ltom_center_vl5.flac"),
             },
         },
     },
@@ -981,10 +1075,12 @@ def synthesize_studio_snare(
       - Real CC0 coated-head top mic, bottom snare-wire mic, stereo overheads & rimshot
       - Subtle 85 ms studio plate ambience, velocity-calibrated studio peak target
     """
-    rr_detune = 0.0 if rr_idx == 1 else 2.2
+    rr_detune = {1: 0.0, 2: 2.2, 3: -1.8, 4: 3.4}.get(rr_idx, 0.0)
+    rr_seed_off = {1: 0, 2: 100, 3: 200, 4: 300}.get(rr_idx, 0)
+    rr_pitch_off = {1: 0.0, 2: 0.008, 3: -0.006, 4: 0.013}.get(rr_idx, 0.0)
     params = {
         "soft": {
-            "seed": 5201 if rr_idx == 1 else 5301,
+            "seed": 5201 + rr_seed_off,
             "duration_s": 0.45,
             "m188_gain": 0.56,
             "tau_188_s": 0.036,
@@ -1003,10 +1099,10 @@ def synthesize_studio_snare(
             "cc0_btm_mix": 0.20,
             "cc0_rim_mix": 0.0,
             "cc0_tau_gate_s": 0.084,
-            "pitch_ratio": 0.875 if rr_idx == 1 else 0.883,
+            "pitch_ratio": 0.875 + rr_pitch_off,
         },
         "med": {
-            "seed": 5202 if rr_idx == 1 else 5302,
+            "seed": 5202 + rr_seed_off,
             "duration_s": 0.51,
             "m188_gain": 0.65,
             "tau_188_s": 0.044,
@@ -1025,10 +1121,10 @@ def synthesize_studio_snare(
             "cc0_btm_mix": 0.30,
             "cc0_rim_mix": 0.0,
             "cc0_tau_gate_s": 0.098,
-            "pitch_ratio": 0.880 if rr_idx == 1 else 0.888,
+            "pitch_ratio": 0.880 + rr_pitch_off,
         },
         "hard": {
-            "seed": 5203 if rr_idx == 1 else 5303,
+            "seed": 5203 + rr_seed_off,
             "duration_s": 0.56,
             "m188_gain": 0.60,
             "tau_188_s": 0.045,
@@ -1047,7 +1143,7 @@ def synthesize_studio_snare(
             "cc0_btm_mix": 0.44,
             "cc0_rim_mix": 0.28,
             "cc0_tau_gate_s": 0.112,
-            "pitch_ratio": 0.885 if rr_idx == 1 else 0.893,
+            "pitch_ratio": 0.885 + rr_pitch_off,
         },
     }[velocity_layer]
 
@@ -1273,6 +1369,148 @@ def synthesize_studio_snare(
 
 
 # ---------------------------------------------------------------------------
+# Acoustic Studio Rack & Floor Tom Synthesis + CC0 Multi-Mic Hybridization
+# ---------------------------------------------------------------------------
+
+
+def synthesize_studio_tom(
+    tom_pitch: str = "mid",
+    sr: int = SAMPLE_RATE,
+    cc0_bundle: dict | None = None,
+    rr_idx: int = 1,
+) -> tuple[list[float], list[float]]:
+    """
+    Model studio maple/birch High (10" ~168 Hz), Mid (12" ~126 Hz), and Floor (16" ~88 Hz) toms,
+    hybridized phase-coherently with CC0 studio close + overhead recordings (`virtuosity_drums`).
+    """
+    rr_det = 0.0 if rr_idx == 1 else 1.4
+    cfg = {
+        "high": {
+            "seed": 6101 if rr_idx == 1 else 6201,
+            "duration_s": 0.56,
+            "f_end": 168.0 + rr_det,
+            "f_drop": 44.0,
+            "tau_body": 0.145,
+            "tau_over": 0.070,
+            "stick_gain": 0.34,
+            "pitch_ratio": 1.00 if rr_idx == 1 else 1.012,
+            "hp_hz": 75.0,
+        },
+        "mid": {
+            "seed": 6102 if rr_idx == 1 else 6202,
+            "duration_s": 0.64,
+            "f_end": 126.0 + rr_det,
+            "f_drop": 38.0,
+            "tau_body": 0.175,
+            "tau_over": 0.082,
+            "stick_gain": 0.32,
+            "pitch_ratio": 0.80 if rr_idx == 1 else 1.02,
+            "hp_hz": 58.0,
+        },
+        "floor": {
+            "seed": 6103 if rr_idx == 1 else 6203,
+            "duration_s": 0.74,
+            "f_end": 88.0 + 0.8 * rr_det,
+            "f_drop": 32.0,
+            "tau_body": 0.215,
+            "tau_over": 0.095,
+            "stick_gain": 0.30,
+            "pitch_ratio": 0.84 if rr_idx == 1 else 0.855,
+            "hp_hz": 42.0,
+        },
+    }[tom_pitch]
+
+    rng = random.Random(cfg["seed"])
+    n = int(round(cfg["duration_s"] * sr))
+    inv_sr = 1.0 / sr
+    two_pi = 2.0 * math.pi
+
+    shell = [0.0] * n
+    stick_raw = [0.0] * n
+    phi_f0 = 0.0
+    phi_f1 = 0.0
+    f_end = cfg["f_end"]
+    f_drop = cfg["f_drop"]
+
+    for i in range(n):
+        t = i * inv_sr
+        att = 1.0 - math.exp(-t / 0.00050)
+        f0 = f_end + f_drop * math.exp(-t / 0.016)
+        phi_f0 += two_pi * f0 * inv_sr
+        phi_f1 += two_pi * (1.58 * f0) * inv_sr
+        s_main = 0.84 * math.exp(-t / cfg["tau_body"]) * math.sin(phi_f0)
+        s_over = 0.24 * math.exp(-t / cfg["tau_over"]) * math.sin(phi_f1)
+        shell[i] = math.tanh(1.24 * att * (s_main + s_over)) / math.tanh(1.24)
+        if t < 0.020:
+            env_st = (1.0 - math.exp(-t / 0.00025)) * (0.75 * math.exp(-t / 0.0024) + 0.25 * math.exp(-t / 0.0055))
+            stick_raw[i] = (0.65 * rng.uniform(-1.0, 1.0) + 0.55 * math.exp(-t / 0.0010)) * env_st
+
+    shell_clean = _apply_biquad(shell, _biquad_coeffs_peaking(395.0, gain_db=-8.5, q=1.35, sr=sr))
+    st_mid = _apply_biquad(stick_raw, _biquad_coeffs_bandpass(2650.0, q=1.15, sr=sr))
+    st_hi = _apply_biquad(stick_raw, _biquad_coeffs_bandpass(4400.0, q=1.30, sr=sr))
+    sg = cfg["stick_gain"]
+    dry_mono = [shell_clean[i] + sg * (0.62 * st_mid[i] + 0.45 * st_hi[i]) for i in range(n)]
+
+    room_src = _apply_biquad(dry_mono, _biquad_coeffs_highpass(190.0, q=0.707, sr=sr))
+    taps_l = [(8.2, 0.36), (16.4, -0.22), (26.5, 0.14)]
+    taps_r = [(9.1, 0.34), (17.8, -0.21), (28.2, 0.13)]
+    rm_l, rm_r = _add_early_studio_room(room_src, sr=sr, taps_ms_gains_l=taps_l, taps_ms_gains_r=taps_r, lp_hz=4500.0)
+
+    left = [dry_mono[i] + 0.075 * rm_l[i] for i in range(n)]
+    right = [dry_mono[i] + 0.075 * rm_r[i] for i in range(n)]
+
+    if cc0_bundle and cc0_bundle.get("close") and cc0_bundle.get("oh"):
+        syn_mid = [0.5 * (left[i] + right[i]) for i in range(n)]
+        pk_syn, pol_syn = _find_primary_transient_peak(syn_mid, int(0.018 * sr))
+        close_raw = cc0_bundle["close"][0]
+        oh_l_raw, oh_r_raw = cc0_bundle["oh"]
+        pk_c_abs = max((abs(x) for x in close_raw), default=0.0)
+        if pk_c_abs > 1e-6:
+            ons = next((i for i, x in enumerate(close_raw) if abs(x) >= 0.06 * pk_c_abs), 0)
+            trim = max(0, ons - 12)
+            pr = cfg["pitch_ratio"]
+            need = int((n + 512) * pr) + 96
+            cl_p = _resample_sinc_list(close_raw[trim : trim + need], pr)
+            ohl_p = _resample_sinc_list(oh_l_raw[trim : trim + need], pr)
+            ohr_p = _resample_sinc_list(oh_r_raw[trim : trim + need], pr)
+
+            cl_eq = _apply_biquad(
+                _apply_biquad(
+                    _apply_biquad(cl_p, _biquad_coeffs_highpass(cfg["hp_hz"], q=0.707, sr=sr)),
+                    _biquad_coeffs_peaking(410.0, gain_db=-8.5, q=1.30, sr=sr),
+                ),
+                _biquad_coeffs_peaking(3400.0, gain_db=2.8, q=1.05, sr=sr),
+            )
+            hp200 = _biquad_coeffs_highpass(200.0, q=0.707, sr=sr)
+            pk410 = _biquad_coeffs_peaking(410.0, gain_db=-6.5, q=1.30, sr=sr)
+            ohl_eq = _apply_biquad(_apply_biquad(ohl_p, hp200), pk410)
+            ohr_eq = _apply_biquad(_apply_biquad(ohr_p, hp200), pk410)
+
+            pk_cc0, pol_cc0 = _find_primary_transient_peak(cl_eq, int(0.020 * sr))
+            cl_pk = max((abs(x) for x in cl_eq[: int(0.06 * sr)]), default=1e-9) + 1e-9
+            oh_pk = max(
+                max((abs(x) for x in ohl_eq[: int(0.07 * sr)]), default=0.0),
+                max((abs(x) for x in ohr_eq[: int(0.07 * sr)]), default=0.0),
+            ) + 1e-9
+
+            cl_al = _align_and_pad_layer(cl_eq, pk_cc0, pk_syn, n)
+            ohl_al = _align_and_pad_layer(ohl_eq, pk_cc0, pk_syn, n)
+            ohr_al = _align_and_pad_layer(ohr_eq, pk_cc0, pk_syn, n)
+            pol_m = pol_syn * pol_cc0
+            cmix = 0.50 * pol_m / cl_pk
+            omix = 0.20 * pol_m / oh_pk
+            for i in range(n):
+                t = i * inv_sr
+                gate = 1.0 if t <= 0.14 else math.exp(-(t - 0.14) / 0.16)
+                c_val = cmix * gate * cl_al[i]
+                left[i] = 0.72 * left[i] + c_val + omix * gate * ohl_al[i]
+                right[i] = 0.72 * right[i] + c_val + omix * gate * ohr_al[i]
+
+    target_pk = 10.0 ** (-1.50 / 20.0)
+    return _finalize_stereo_sample(left, right, hp_hz=cfg["hp_hz"], sr=sr, target_peak=target_pk)
+
+
+# ---------------------------------------------------------------------------
 # Public Directory & Auto-Generation Helper
 # ---------------------------------------------------------------------------
 
@@ -1280,15 +1518,15 @@ def synthesize_studio_snare(
 def _load_optional_cc0_studio_packs(sr: int = SAMPLE_RATE) -> dict:
     """
     Fetch & decode CC0-1.0 studio multi-mic recordings (`virtuosity_drums` +
-    `karoryfer.frankensnare`) into memory for both RR1 and RR2 hybrid studio WAVs.
-    Gracefully returns partial/empty dict if offline or if `ffmpeg` is unavailable.
+    `karoryfer.frankensnare`) into memory for RR1..RR4 hybrid studio WAVs & Toms.
+    Gracefully skips individual unavailable files without aborting the rest.
     """
     ffmpeg_bin = _locate_ffmpeg()
     if not ffmpeg_bin:
         return {}
 
-    packs: dict = {"kick": {}, "snare": {}}
-    tmp_dir = tempfile.mkdtemp(prefix="studioeq_cc0_drums_v2_")
+    packs: dict = {}
+    tmp_dir = tempfile.mkdtemp(prefix="studioeq_cc0_drums_v3_")
     try:
         for inst, layers in CC0_STUDIO_PACK_MAP.items():
             packs[inst] = {}
@@ -1301,12 +1539,13 @@ def _load_optional_cc0_studio_packs(sr: int = SAMPLE_RATE) -> dict:
                             bundle[mic_key] = None
                         else:
                             base_url, rel_path = spec
-                            bundle[mic_key] = _fetch_and_decode_cc0_flac(
-                                base_url, rel_path, ffmpeg_bin, tmp_dir, sr=sr
-                            )
+                            try:
+                                bundle[mic_key] = _fetch_and_decode_cc0_flac(
+                                    base_url, rel_path, ffmpeg_bin, tmp_dir, sr=sr
+                                )
+                            except Exception:
+                                bundle[mic_key] = None
                     packs[inst][layer][rr_idx] = bundle
-    except Exception:
-        return {}
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -1334,8 +1573,10 @@ def _is_valid_wav_file(path: str) -> bool:
 
 def generate_all_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR, force: bool = False) -> list[str]:
     """
-    Generate all 12 multi-velocity & multi-round-robin (6 canonical RR1 + 6 RR2)
-    24-bit 44.1 kHz stereo studio WAV files in `samples_dir`.
+    Generate all studio 24-bit 44.1 kHz stereo WAV files in `samples_dir`:
+      - Kick RR1 + RR2 (`soft`, `med`, `hard`)
+      - Snare RR1 + RR2 + RR3 + RR4 (`soft`, `med`, `hard` — 4-way Round-Robin for fast rolls!)
+      - Studio Toms RR1 + RR2 (`high`, `mid`, `floor`)
     """
     samples_dir = os.path.abspath(samples_dir)
     os.makedirs(samples_dir, exist_ok=True)
@@ -1347,6 +1588,18 @@ def generate_all_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR, for
                 out_path = os.path.join(samples_dir, filename)
                 if force or not _is_valid_wav_file(out_path):
                     missing_targets.append((instrument, layer, rr_idx, out_path))
+
+    for rr_idx, layers in STUDIO_SNARE_ROLL_RR.items():
+        for layer, filename in layers.items():
+            out_path = os.path.join(samples_dir, filename)
+            if force or not _is_valid_wav_file(out_path):
+                missing_targets.append(("snare", layer, rr_idx, out_path))
+
+    for rr_idx, pitches in STUDIO_TOM_FILES.items():
+        for tom_pitch, filename in pitches.items():
+            out_path = os.path.join(samples_dir, filename)
+            if force or not _is_valid_wav_file(out_path):
+                missing_targets.append(("tom", tom_pitch, rr_idx, out_path))
 
     if not missing_targets:
         return []
@@ -1362,6 +1615,10 @@ def generate_all_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR, for
             left, right = synthesize_studio_kick(
                 velocity_layer=layer, sr=SAMPLE_RATE, cc0_bundle=bundle, rr_idx=rr_idx
             )
+        elif instrument == "tom":
+            left, right = synthesize_studio_tom(
+                tom_pitch=layer, sr=SAMPLE_RATE, cc0_bundle=bundle, rr_idx=rr_idx
+            )
         else:
             left, right = synthesize_studio_snare(
                 velocity_layer=layer, sr=SAMPLE_RATE, cc0_bundle=bundle, rr_idx=rr_idx
@@ -1374,7 +1631,7 @@ def generate_all_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR, for
 
 def ensure_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR) -> dict:
     """
-    Ensure all canonical RR1 and alternate RR2 studio multi-velocity drum WAV samples
+    Ensure all canonical RR1, alternate RR2..RR4, and Studio Tom WAV samples
     exist in `samples_dir` (auto-generating any missing ones) and detect optional
     user custom samples (`custom_kick.wav`, `custom_snare.wav`).
     """
@@ -1399,6 +1656,22 @@ def ensure_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR) -> dict:
         layer: os.path.join(samples_dir, fname)
         for layer, fname in STUDIO_SAMPLE_FILES_RR2["snare"].items()
     }
+    snare_rr3_paths = {
+        layer: os.path.join(samples_dir, fname)
+        for layer, fname in STUDIO_SNARE_ROLL_RR[3].items()
+    }
+    snare_rr4_paths = {
+        layer: os.path.join(samples_dir, fname)
+        for layer, fname in STUDIO_SNARE_ROLL_RR[4].items()
+    }
+    tom_rr1_paths = {
+        tp: os.path.join(samples_dir, fname)
+        for tp, fname in STUDIO_TOM_FILES[1].items()
+    }
+    tom_rr2_paths = {
+        tp: os.path.join(samples_dir, fname)
+        for tp, fname in STUDIO_TOM_FILES[2].items()
+    }
 
     custom_kick_candidate = os.path.join(samples_dir, "custom_kick.wav")
     custom_snare_candidate = os.path.join(samples_dir, "custom_snare.wav")
@@ -1411,6 +1684,10 @@ def ensure_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR) -> dict:
         "snare": snare_paths,
         "kick_rr2": kick_rr2_paths,
         "snare_rr2": snare_rr2_paths,
+        "snare_rr3": snare_rr3_paths,
+        "snare_rr4": snare_rr4_paths,
+        "toms": tom_rr1_paths,
+        "toms_rr2": tom_rr2_paths,
         "custom_kick": custom_kick,
         "custom_snare": custom_snare,
         "generated": generated,

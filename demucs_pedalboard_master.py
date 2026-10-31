@@ -482,13 +482,24 @@ def process_vocals_stem(vocals: np.ndarray, sr: int = 44100) -> np.ndarray:
 def process_drums_stem(drums: np.ndarray, sr: int = 44100, drum_mode: str = "off") -> np.ndarray:
     """
     Catena Studio Batteria (Spotify Pedalboard):
-    - Quando `drum_mode != "off"` ("natural" / "punch"), `drums` proviene da `enhance_and_reinforce_drums`
-      con sample da studio Cassa/Rullante già scolpiti e anti-mud dinamico già applicato: esegue un
-      Gentle Studio Drum Bus Polish equilibrato senza sovra-enfatizzare i piatti né comprimere due volte.
+    - Quando `drum_mode == "studio_v3"`, `drums` proviene dalla pipeline completa `DrumSep` a 4 sub-stems
+      con 90% Studio Replacement (Kick, Snare 4xRR con Fast-Roll Engine, Toms), piatti restaurati con Apollo
+      e Studio Drum Room IR già applicata: applica solo protezione sub-30 Hz e colla dinamica trasparente.
+    - Quando `drum_mode` è `"natural"` / `"punch"`, esegue un Gentle Studio Drum Bus Polish equilibrato.
     - Quando `drum_mode == "off"`, applica la catena completa di recupero per batteria grezza da sala prove.
     """
-    enhanced_active = (drum_mode or "off").strip().lower() != "off"
-    if enhanced_active:
+    mode_norm = (drum_mode or "off").strip().lower()
+    if mode_norm == "studio_v3":
+        print(
+            "[Stem 2/4 - BATTERIA] Transparent Studio v3 Bus Glue (DrumSep 4-Sub-Stems + Fast-Roll Engine)...",
+            flush=True,
+        )
+        board = Pedalboard([
+            HighpassFilter(cutoff_frequency_hz=30.0),
+            Compressor(threshold_db=-15.5, ratio=1.55, attack_ms=32.0, release_ms=95.0),
+            Gain(gain_db=0.2),
+        ])
+    elif mode_norm != "off":
         print(
             f"[Stem 2/4 - BATTERIA] Gentle Studio Drum Bus Polish (drum_mode={drum_mode})...",
             flush=True,
@@ -643,8 +654,32 @@ def _invoke_drum_enhancer(
     drum_mode: str,
     kick_blend: float | None,
     snare_blend: float | None,
+    drumsep_cache_dir: str | None = None,
+    force_reseparate: bool = False,
 ) -> tuple[np.ndarray, dict]:
-    """Call `audio_modules.drum_replacer.enhance_and_reinforce_drums` adhering strictly to contract."""
+    """Call `drumsep_v3` when `drum_mode == 'studio_v3'` or `drum_replacer.enhance_and_reinforce_drums`."""
+    if (drum_mode or "").strip().lower() == "studio_v3":
+        try:
+            from audio_modules.drumsep_v3 import enhance_drums_v3_drumsep
+
+            print(
+                "[DrumSep v3] Separazione 4 Sub-Stems (Kick/Snare/Cymbals/Toms) + True Acoustic Remaster (Zero Colpi Inventati, Sub-Bass & Anti-Ovattato)...",
+                flush=True,
+            )
+            v3_res = enhance_drums_v3_drumsep(
+                drums_2xN,
+                sr=sr,
+                drumsep_cache_dir=drumsep_cache_dir,
+                load_wav_fn=load_audio_stereo_44k,
+                save_wav_fn=save_audio_ffmpeg,
+            )
+            if v3_res is not None:
+                v3_audio, v3_stats = v3_res
+                return np.asarray(v3_audio, dtype=np.float32), v3_stats
+        except Exception as exc:
+            print(f"[DrumSep v3] Fallback a 'punch' ({type(exc).__name__}: {exc})", flush=True)
+        drum_mode = "punch"
+
     from audio_modules.drum_replacer import enhance_and_reinforce_drums
 
     sig = inspect.signature(enhance_and_reinforce_drums)
@@ -664,6 +699,86 @@ def _invoke_drum_enhancer(
 
     drums_clean, drum_stats = enhance_and_reinforce_drums(drums_2xN, **kwargs)
     return np.asarray(drums_clean, dtype=np.float32), (drum_stats if isinstance(drum_stats, dict) else {})
+
+
+def separate_and_restore_guitar_transparent(
+    orig_2xN: np.ndarray,
+    other_4s_2xN: np.ndarray,
+    out_dir: str,
+    track_hash: str,
+    sr: int = 44100,
+    force_reseparate: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """
+    Pure Non-Manipulative Guitar Restoration (`htdemucs_6s` + `JusperLee/Apollo` + `noisereduce`):
+      - Extracts dedicated `guitar`, `piano`, `other` stems via `htdemucs_6s` (with SHA-256 cache).
+      - Restores `guitar` via `restore_guitar_transparent` (ZERO amp/overdrive/chorus/EQ/widening
+        manipulation; >99% core waveform & phase correlation in 85-3400 Hz!).
+      - Cleans `piano + other` gently and recombines with the pure restored guitar for the 4-stem mix.
+      Returns `(guitar_raw, guitar_restored, combined_other_clean, guitar_stats)`.
+    """
+    from audio_modules.apollo_restorer import restore_guitar_transparent
+
+    cache_6s = os.path.join(out_dir, "stems_6s", track_hash)
+    os.makedirs(cache_6s, exist_ok=True)
+    paths_6s = {k: os.path.join(cache_6s, f"{k}.wav") for k in ("guitar", "piano", "other")}
+
+    n_target = other_4s_2xN.shape[1]
+    can_use_cache = (
+        (not force_reseparate)
+        and abs(orig_2xN.shape[1] - n_target) < (sr // 4)
+        and all(os.path.isfile(p) and os.path.getsize(p) > 1024 for p in paths_6s.values())
+    )
+
+    if can_use_cache:
+        print(f"[htdemucs_6s] Cache SHA-256 rilevata ({track_hash}): caricamento stem dedicato Chitarra...", flush=True)
+        stems_6s = {k: load_audio_stereo_44k(p, sr=sr)[:, :n_target] for k, p in paths_6s.items()}
+    else:
+        print("[htdemucs_6s] Estrazione neurale stem dedicato Chitarra (6-Stems Transformer)...", flush=True)
+        sep_all = separate_with_demucs(orig_2xN, model_name="htdemucs_6s")
+        stems_6s = {k: sep_all[k][:, :n_target] for k in ("guitar", "piano", "other")}
+        if abs(orig_2xN.shape[1] - n_target) < (sr // 4):
+            for k, arr in stems_6s.items():
+                save_audio_ffmpeg(arr, paths_6s[k], sr=sr)
+
+    guitar_raw = stems_6s["guitar"]
+    apollo_cache_wav = os.path.join(cache_6s, "guitar_apollo_restored.wav")
+    apollo_cache_json = os.path.join(cache_6s, "guitar_apollo_stats.json")
+    if (not force_reseparate) and os.path.isfile(apollo_cache_wav) and os.path.getsize(apollo_cache_wav) > 1024:
+        print("[Apollo Guitar Restorer] Cache restauro lossless 44.1 kHz rilevata: caricamento istantaneo...", flush=True)
+        guitar_restored = load_audio_stereo_44k(apollo_cache_wav, sr=sr)[:, :n_target]
+        if os.path.isfile(apollo_cache_json):
+            try:
+                with open(apollo_cache_json, "r", encoding="utf-8") as gf:
+                    g_stats = json.load(gf)
+            except Exception:
+                g_stats = {"apollo_applied": True}
+        else:
+            g_stats = {"apollo_applied": True}
+    else:
+        print("[Apollo Guitar Restorer] Restauro codec lossless 44.1 kHz & de-hiss (ZERO manipolazione timbrica)...", flush=True)
+        guitar_restored, g_stats = restore_guitar_transparent(guitar_raw, sr=sr)
+        if abs(orig_2xN.shape[1] - n_target) < (sr // 4):
+            save_audio_ffmpeg(guitar_restored, apollo_cache_wav, sr=sr)
+            with open(apollo_cache_json, "w", encoding="utf-8") as gf:
+                json.dump(g_stats, gf, indent=2, ensure_ascii=False)
+
+    # Clean non-guitar harmonic accompaniment (`piano` + `other`) gently without altering guitar
+    accomp_raw = stems_6s["piano"] + stems_6s["other"]
+    if float(np.max(np.abs(accomp_raw))) > 1e-4:
+        accomp_clean = nr.reduce_noise(
+            y=accomp_raw, sr=sr, stationary=True, prop_decrease=0.30, n_fft=2048
+        ).astype(np.float32)
+        accomp_board = Pedalboard([
+            HighpassFilter(cutoff_frequency_hz=95.0),
+            PeakFilter(cutoff_frequency_hz=210.0, gain_db=-2.2, q=1.5),
+        ])
+        accomp_clean = accomp_board(accomp_clean, sr)
+    else:
+        accomp_clean = accomp_raw.astype(np.float32)
+
+    combined = np.clip(guitar_restored + accomp_clean, -0.96, 0.96).astype(np.float32)
+    return guitar_raw, guitar_restored, combined, g_stats
 
 
 def _invoke_bass_enhancer(
@@ -827,7 +942,7 @@ def run_full_pipeline(
         )
     vocals_eq = process_vocals_stem(vocals_tuned, sr=sr)
 
-    # 5. Batteria: Drum Replacer / Transient Reinforcement + Drum Strip
+    # 5. Batteria: Drum Replacer / DrumSep v3 4-Sub-Stems + Drum Strip
     emit_progress(
         pct=83.0,
         stage_idx=3,
@@ -835,12 +950,20 @@ def run_full_pipeline(
         detail=f"2/4 Batteria — Drum Enhancer ({drum_mode}) & Anti-Box Strip",
         gpu=gpu_label,
     )
+    is_unstretched = abs(orig.shape[1] - raw_stems["drums"].shape[1]) < (sr // 4)
+    drumsep_cache = (
+        os.path.join(out_dir, "stems_drumsep", track_hash)
+        if (is_unstretched and not force_reseparate)
+        else None
+    )
     drums_clean, drum_stats = _invoke_drum_enhancer(
         raw_stems["drums"],
         sr=sr,
         drum_mode=drum_mode,
         kick_blend=kick_blend,
         snare_blend=snare_blend,
+        drumsep_cache_dir=drumsep_cache,
+        force_reseparate=force_reseparate,
     )
     drums_eq = process_drums_stem(drums_clean, sr=sr, drum_mode=drum_mode)
 
@@ -863,15 +986,42 @@ def run_full_pipeline(
     )
     bass_eq = process_bass_stem(bass_clean, sr=sr, bass_mode=bass_mode)
 
-    # 7. Chitarre / Altro: De-Buzz + EQ + Mid/Side Stereo Widening
-    emit_progress(
-        pct=90.0,
-        stage_idx=3,
-        stage="Restauro & Channel Strip Stems",
-        detail="4/4 Chitarre & Altro — EQ Presenza & Mid/Side Stereo",
-        gpu=gpu_label,
-    )
-    other_eq = process_other_stem(raw_stems["other"], sr=sr)
+    # 7. Chitarre / Altro: in `studio_v3` (o se `stems_6s` è in cache) usa `htdemucs_6s` + `JusperLee/Apollo`
+    #    SENZA manipolare la chitarra; altrimenti usa il Channel Strip standard
+    guitar_raw_6s: np.ndarray | None = None
+    guitar_restored_6s: np.ndarray | None = None
+    guitar_stats: dict = {}
+    has_cached_6s = os.path.isfile(os.path.join(out_dir, "stems_6s", track_hash, "guitar.wav"))
+
+    if is_unstretched and (drum_mode == "studio_v3" or has_cached_6s):
+        emit_progress(
+            pct=90.0,
+            stage_idx=3,
+            stage="Restauro & Channel Strip Stems",
+            detail="4/4 Chitarra Pura (htdemucs_6s + Apollo 44.1kHz — Zero Manipolazione)",
+            gpu=gpu_label,
+        )
+        try:
+            guitar_raw_6s, guitar_restored_6s, other_eq, guitar_stats = separate_and_restore_guitar_transparent(
+                orig,
+                raw_stems["other"],
+                out_dir=out_dir,
+                track_hash=track_hash,
+                sr=sr,
+                force_reseparate=force_reseparate,
+            )
+        except Exception as g_exc:
+            print(f"[Apollo Guitar Restorer] Fallback a Channel Strip standard ({g_exc})", flush=True)
+            other_eq = process_other_stem(raw_stems["other"], sr=sr)
+    else:
+        emit_progress(
+            pct=90.0,
+            stage_idx=3,
+            stage="Restauro & Channel Strip Stems",
+            detail="4/4 Chitarre & Altro — EQ Presenza & Mid/Side Stereo",
+            gpu=gpu_label,
+        )
+        other_eq = process_other_stem(raw_stems["other"], sr=sr)
 
     vocals_eq, drums_eq, bass_eq, other_eq = _align_stems_length(vocals_eq, drums_eq, bass_eq, other_eq)
 
@@ -880,7 +1030,7 @@ def run_full_pipeline(
         pct=93.0,
         stage_idx=4,
         stage="Mastering & Esportazione 24-Bit",
-        detail="Salvataggio 4 Stems WAV 24-bit e MP3 320 kbps...",
+        detail="Salvataggio Stems Studio WAV 24-bit e MP3 320 kbps...",
         gpu=gpu_label,
     )
     stem_exports = {
@@ -889,9 +1039,30 @@ def run_full_pipeline(
         "03_Basso_StudioEQ": bass_eq,
         "04_Chitarre_Altro_StudioEQ": other_eq,
     }
+    if guitar_restored_6s is not None:
+        stem_exports["05_Chitarra_Pura_Restaurata"] = guitar_restored_6s
+
     for name, audio_arr in stem_exports.items():
         save_audio_ffmpeg(audio_arr, os.path.join(stems_dir, f"{name}.wav"), sr=sr)
         save_audio_ffmpeg(audio_arr, os.path.join(stems_dir, f"{name}.mp3"), sr=sr)
+
+    # Esporta anche lo stem Batteria Standalone Masterizzato a -14.0 LUFS per ascolto isolato su smartphone!
+    drum_standalone_metrics: dict = {}
+    if drum_mode != "off":
+        try:
+            from audio_modules.drumsep_v3 import master_standalone_drum_stem
+
+            drums_mastered_solo, drum_standalone_metrics = master_standalone_drum_stem(
+                drums_eq, sr=sr, target_lufs=-14.0
+            )
+            save_audio_ffmpeg(
+                drums_mastered_solo, os.path.join(stems_dir, "02_Batteria_StudioEQ_Mastered.wav"), sr=sr
+            )
+            save_audio_ffmpeg(
+                drums_mastered_solo, os.path.join(stems_dir, "02_Batteria_StudioEQ_Mastered.mp3"), sr=sr
+            )
+        except Exception:
+            pass
 
     # 9. Somma Multi-Traccia e Master Bus finale (-11.2 LUFS, -0.50 dBTP)
     summed = vocals_eq + drums_eq + bass_eq + other_eq
@@ -909,19 +1080,67 @@ def run_full_pipeline(
     save_audio_ffmpeg(master_audio, out_wav, sr=sr)
     save_audio_ffmpeg(master_audio, out_mp3, sr=sr)
 
+    # 10. Auto-Riascolto & Controllo Qualità AI (`ai_audio_critic.py`)
+    quality_audit: dict = {}
+    try:
+        from audio_modules.ai_audio_critic import audit_drum_upgrade_quality, audit_guitar_non_manipulation
+
+        iso_snare_arr = None
+        snare_cache_wav = os.path.join(out_dir, "stems_drumsep", track_hash, "snare.wav")
+        if is_unstretched and os.path.isfile(snare_cache_wav):
+            iso_snare_arr = load_audio_stereo_44k(snare_cache_wav, sr=sr)
+
+        drum_audit = audit_drum_upgrade_quality(
+            raw_stems["drums"],
+            drums_eq,
+            sr=sr,
+            isolated_snare_2xn=iso_snare_arr,
+            snare_positions=drum_stats.get("snare_positions") if isinstance(drum_stats, dict) else None,
+        )
+        quality_audit["drums"] = drum_audit
+        print(
+            f"[AI Self-Listening Critic - BATTERIA] Score={drum_audit['score_0_100']}/100 | "
+            f"Fast-Roll Recall={drum_audit['fast_roll_recall_pct']}% ({drum_audit['fast_roll_strokes_checked']} colpi) | "
+            f"Sub/Box +{drum_audit['sub_to_box_gain_db']} dB | "
+            f"Clarity/Mud +{drum_audit.get('clarity_hi_to_mud_gain_db', 0.0)} dB",
+            flush=True,
+        )
+        if guitar_raw_6s is not None and guitar_restored_6s is not None:
+            g_audit = audit_guitar_non_manipulation(guitar_raw_6s, guitar_restored_6s, sr=sr)
+            quality_audit["guitar"] = g_audit
+            print(
+                f"[AI Self-Listening Critic - CHITARRA] Score={g_audit['score_0_100']}/100 | "
+                f"Core Timbre Identity={g_audit['core_waveform_corr_85_3400hz']*100:.2f}% | "
+                f"Unmanipulated={g_audit['unmanipulated_verified']}",
+                flush=True,
+            )
+    except Exception as aud_exc:
+        print(f"[AI Self-Listening Critic] Nota: {aud_exc}", flush=True)
+
+    drum_hits_report: dict[str, int] = {
+        "kicks": int(drum_stats.get("kicks", 0)),
+        "snares": int(drum_stats.get("snares", 0)),
+    }
+    if "toms" in drum_stats:
+        drum_hits_report["toms"] = int(drum_stats.get("toms", 0))
+    if "double_pedal_strokes" in drum_stats:
+        drum_hits_report["double_pedal_strokes"] = int(drum_stats.get("double_pedal_strokes", 0))
+    if "fast_roll_strokes" in drum_stats:
+        drum_hits_report["fast_roll_strokes"] = int(drum_stats.get("fast_roll_strokes", 0))
+
     report = {
         "original_lufs": orig_lufs,
         "master_ai": master_metrics,
+        "drum_standalone_master": drum_standalone_metrics,
         "detected_bpm": round(float(detected_bpm), 1),
         "effective_bpm": round(float(effective_bpm), 1),
         "detected_key": key_info["label"],
         "autotune_mode": autotune_mode,
         "drum_mode": drum_mode,
         "bass_mode": bass_mode,
-        "drum_hits": {
-            "kicks": int(drum_stats.get("kicks", 0)),
-            "snares": int(drum_stats.get("snares", 0)),
-        },
+        "drum_hits": drum_hits_report,
+        "guitar_restoration": guitar_stats,
+        "quality_audit": quality_audit,
         "cache_hit": bool(cache_hit),
         "gpu": gpu_label,
         "output_wav": out_wav,
@@ -962,9 +1181,9 @@ def _parse_cli_and_options(argv: list[str] | None = None) -> tuple[str, str, dic
     )
     parser.add_argument(
         "--drum-mode",
-        choices=["off", "natural", "punch"],
+        choices=["off", "natural", "punch", "studio_v3"],
         default=None,
-        help="Modalità Drum Enhancer & Sample Reinforcement (default: natural)",
+        help="Modalità Drum Enhancer & Sample Reinforcement (default: natural; studio_v3 = DrumSep 4-sub-stems)",
     )
     parser.add_argument(
         "--bass-mode",

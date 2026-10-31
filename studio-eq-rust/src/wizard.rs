@@ -195,6 +195,7 @@ pub enum DrumSampleMode {
     Off,
     Naturale,
     StudioPunch,
+    StudioV3,
 }
 
 impl DrumSampleMode {
@@ -203,6 +204,7 @@ impl DrumSampleMode {
             Self::Off => "Spento (Off)",
             Self::Naturale => "Naturale (Consigliato)",
             Self::StudioPunch => "Studio Punch",
+            Self::StudioV3 => "Studio v3 (DrumSep)",
         }
     }
 
@@ -211,6 +213,7 @@ impl DrumSampleMode {
             Self::Off => "off",
             Self::Naturale => "natural",
             Self::StudioPunch => "punch",
+            Self::StudioV3 => "studio_v3",
         }
     }
 }
@@ -1755,7 +1758,7 @@ fn draw_step_3_studio_ai_and_bpm(ui: &mut Ui, state: &mut GuidedWizardState, tot
         "Auto-Tune Voce (Intonazione Musicale)",
         "Rileva tonalità e allinea le note",
         StudioPalette::STUDIO_VIOLET,
-        [
+        &[
             (
                 AutoTuneMode::Off.label(),
                 state.autotune_mode == AutoTuneMode::Off,
@@ -1780,32 +1783,37 @@ fn draw_step_3_studio_ai_and_bpm(ui: &mut Ui, state: &mut GuidedWizardState, tot
 
     ui.add_space(6.0_f32);
 
-    // 2. Sample Batteria Studio
+    // 2. Sample Batteria Studio (inclusa Pipeline v3 Completa DrumSep + Fast-Roll Engine)
     draw_studio_ai_card_row(
         ui,
         total_w,
         "Sample Batteria Studio",
-        "Aiuto Cassa & Rullante Anti-Pastoso",
+        "Cassa, Rullante (Rullate Veloci) & Tom",
         StudioPalette::WARM_AMBER,
-        [
+        &[
             (
                 DrumSampleMode::Off.label(),
                 state.drum_mode == DrumSampleMode::Off,
             ),
             (
-                DrumSampleMode::Naturale.label(),
+                "Naturale",
                 state.drum_mode == DrumSampleMode::Naturale,
             ),
             (
                 DrumSampleMode::StudioPunch.label(),
                 state.drum_mode == DrumSampleMode::StudioPunch,
             ),
+            (
+                DrumSampleMode::StudioV3.label(),
+                state.drum_mode == DrumSampleMode::StudioV3,
+            ),
         ],
         |idx| {
             state.drum_mode = match idx {
                 0 => DrumSampleMode::Off,
                 1 => DrumSampleMode::Naturale,
-                _ => DrumSampleMode::StudioPunch,
+                2 => DrumSampleMode::StudioPunch,
+                _ => DrumSampleMode::StudioV3,
             };
         },
     );
@@ -1819,7 +1827,7 @@ fn draw_step_3_studio_ai_and_bpm(ui: &mut Ui, state: &mut GuidedWizardState, tot
         "Ricampionamento Basso",
         "Sub Pulito + Sidechain sulla Cassa",
         StudioPalette::EMERALD,
-        [
+        &[
             (
                 BassEnhanceMode::Off.label(),
                 state.bass_mode == BassEnhanceMode::Off,
@@ -1984,7 +1992,7 @@ fn draw_studio_ai_card_row(
     title: &str,
     subtitle: &str,
     accent: Color32,
-    options: [(&str, bool); 3],
+    options: &[(&str, bool)],
     mut on_select: impl FnMut(usize),
 ) {
     Frame::NONE
@@ -2013,9 +2021,10 @@ fn draw_studio_ai_card_row(
             ui.add_space(4.0_f32);
             ui.horizontal(|ui| {
                 let gap = 8.0_f32;
-                let btn_w = ((inner_w - gap * 2.0_f32) / 3.0_f32).floor();
+                let n_opts = (options.len().max(1)) as f32;
+                let btn_w = ((inner_w - gap * (n_opts - 1.0_f32)) / n_opts).floor();
                 ui.spacing_mut().item_spacing.x = gap;
-                for (idx, (opt_label, is_sel)) in options.into_iter().enumerate() {
+                for (idx, &(opt_label, is_sel)) in options.iter().enumerate() {
                     if draw_segmented_choice_pill(
                         ui,
                         Vec2::new(btn_w, 29.0_f32),

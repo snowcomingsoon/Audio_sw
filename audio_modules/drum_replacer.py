@@ -1175,14 +1175,15 @@ def _soft_saturate_stereo(x: np.ndarray, ceiling: float = 0.950) -> np.ndarray:
 def enhance_and_reinforce_drums(
     drums_2xN: np.ndarray,
     sr: int = 44100,
-    drum_mode: str = "natural",   # "off" | "natural" | "punch"
+    drum_mode: str = "natural",   # "off" | "natural" | "punch" | "studio_v3"
     kick_blend: float | None = None,
     snare_blend: float | None = None,
     samples_dir: str | None = None,
 ) -> tuple[np.ndarray, dict]:
     """
-    Clean muddy rehearsal-room drum stems and reinforce Kick & Snare with
-    NCC phase-aligned, multi-velocity, multi-round-robin studio acoustic samples.
+    Clean muddy rehearsal-room drum stems and reinforce Kick & Snare (or full 4-sub-stem
+    DrumSep v3 replacement when `drum_mode == "studio_v3"`) with NCC phase-aligned,
+    multi-velocity, multi-round-robin studio acoustic samples.
     """
     mode = (drum_mode or "off").strip().lower()
     has_positive_override = (kick_blend is not None and kick_blend > 0.0) or (
@@ -1220,6 +1221,26 @@ def enhance_and_reinforce_drums(
             "snare_positions": [],
             "drum_mode": mode,
         }
+
+    if mode == "studio_v3":
+        try:
+            try:
+                from .drumsep_v3 import enhance_drums_v3_drumsep
+            except ImportError:
+                from drumsep_v3 import enhance_drums_v3_drumsep
+            v3_res = enhance_drums_v3_drumsep(work, sr=sr, samples_dir=samples_dir)
+            if v3_res is not None:
+                v3_stereo, v3_stats = v3_res
+                if orig_ndim == 1:
+                    v3_out = 0.5 * (v3_stereo[0] + v3_stereo[1])
+                elif transposed:
+                    v3_out = v3_stereo.T
+                else:
+                    v3_out = v3_stereo
+                return v3_out.astype(np.float32), v3_stats
+        except Exception:
+            pass
+        mode = "punch"
 
     if mode == "punch":
         default_kb, default_sb = 0.48, 0.46

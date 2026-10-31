@@ -21,9 +21,13 @@ work/
 *.temp_render.wav
 *.bmp
 
-# Distribution / installer staging packages
+# Distribution / installer staging packages & cached neural checkpoints
 dist/
 *.dmg
+assets/models/
+*.th
+*.ckpt
+*.bin
 
 # Explicitly keep distributed root executable, studio drum samples & Python test suites tracked
 !StudioEQ_Master_Pro.exe

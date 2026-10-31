@@ -3285,7 +3285,7 @@ dependencies = [
 
 [[package]]
 name = "studio_eq_master_pro"
-version = "1.0.0"
+version = "3.0.0"
 dependencies = [
  "cpal",
  "eframe",
