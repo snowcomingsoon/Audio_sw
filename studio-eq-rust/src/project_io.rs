@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 
 use crate::audio_io::{constant_power_pan_gains, soft_limit_to_pcm24, StemChannel, StereoBuffer};
-use crate::dsp::{DspParams, FilterKind};
+use crate::dsp::{DspParams, FilterKind, StemEqParams, StemThreeBandChain};
 
 const STEM_EXPORT_FILENAMES: [&str; 4] = [
     "01_Voce_Mix.wav",
@@ -46,6 +46,8 @@ pub fn export_all_stems_wav(
         }
 
         let ch = &channels[idx];
+        let sr = stem.sample_rate.max(8_000);
+        let mut eq_chain = StemThreeBandChain::new(sr as f64, idx, &ch.eq);
         let gain_lin = 10.0_f32.powf(ch.gain_db / 20.0_f32);
         let (pan_l, pan_r) = constant_power_pan_gains(ch.pan);
         let mult_l = gain_lin * pan_l;
@@ -56,7 +58,7 @@ pub fn export_all_stems_wav(
 
         let spec = hound::WavSpec {
             channels: 2,
-            sample_rate: stem.sample_rate.max(8_000),
+            sample_rate: sr,
             bits_per_sample: 24,
             sample_format: hound::SampleFormat::Int,
         };
@@ -65,8 +67,9 @@ pub fn export_all_stems_wav(
             .map_err(|e| format!("Impossibile creare '{file_name}': {e}"))?;
 
         for i in 0..frames {
-            let out_l = stem.left[i] * mult_l;
-            let out_r = stem.right[i] * mult_r;
+            let (eq_l, eq_r) = eq_chain.process_frame(stem.left[i], stem.right[i]);
+            let out_l = eq_l * mult_l;
+            let out_r = eq_r * mult_r;
             writer
                 .write_sample(soft_limit_to_pcm24(out_l))
                 .map_err(|e| format!("Errore scrittura '{file_name}': {e}"))?;
@@ -90,6 +93,7 @@ fn filter_kind_to_str(kind: FilterKind) -> &'static str {
         FilterKind::Peaking => "Peaking",
         FilterKind::HighPass => "HighPass",
         FilterKind::LowPass => "LowPass",
+        FilterKind::LowShelf => "LowShelf",
         FilterKind::HighShelf => "HighShelf",
     }
 }
@@ -99,6 +103,7 @@ fn parse_filter_kind(raw: &str) -> Option<FilterKind> {
         "peaking" | "peak" | "bell" => Some(FilterKind::Peaking),
         "highpass" | "high_pass" | "hp" => Some(FilterKind::HighPass),
         "lowpass" | "low_pass" | "lp" => Some(FilterKind::LowPass),
+        "lowshelf" | "low_shelf" | "ls" => Some(FilterKind::LowShelf),
         "highshelf" | "high_shelf" | "hs" => Some(FilterKind::HighShelf),
         _ => None,
     }
@@ -117,7 +122,17 @@ fn parse_finite_f64(raw: &str) -> Option<f64> {
 }
 
 /// Salva i parametri DSP completi (inclusi tutti gli 8 filtri parametrici) in un file `.seqpreset` leggibile (`key=value`).
+#[allow(dead_code)]
 pub fn save_preset_file(params: &DspParams, path: &Path) -> Result<(), String> {
+    save_preset_file_with_stems(params, None, path)
+}
+
+/// Salva sia i parametri Master EQ sia (opzionalmente) i controlli Bassi/Medi/Alti, Volume e Pan delle 4 tracce isolate.
+pub fn save_preset_file_with_stems(
+    params: &DspParams,
+    stem_channels: Option<&[StemChannel; 4]>,
+    path: &Path,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -129,9 +144,9 @@ pub fn save_preset_file(params: &DspParams, path: &Path) -> Result<(), String> {
         }
     }
 
-    let mut content = String::with_capacity(1024);
+    let mut content = String::with_capacity(1280);
     content.push_str("# StudioEQ Master Pro — Preset File (.seqpreset)\n");
-    content.push_str("format=StudioEQ_SeqPreset_v1\n");
+    content.push_str("format=StudioEQ_SeqPreset_v2\n");
     content.push_str(&format!("bypass={}\n", params.bypass));
     content.push_str(&format!("sub_cut_hz={:.4}\n", params.sub_cut_hz));
     content.push_str(&format!(
@@ -165,16 +180,43 @@ pub fn save_preset_file(params: &DspParams, path: &Path) -> Result<(), String> {
         ));
     }
 
+    if let Some(chs) = stem_channels {
+        content.push_str("\n# Per-Stem 3-Band EQ (low_db,mid_db,high_db) & Mix (gain_db,pan)\n");
+        for (idx, ch) in chs.iter().enumerate() {
+            let eq = ch.eq.clamped();
+            content.push_str(&format!(
+                "stem_{idx}_eq={:.4},{:.4},{:.4}\n",
+                eq.low_db, eq.mid_db, eq.high_db
+            ));
+            content.push_str(&format!(
+                "stem_{idx}_mix={:.4},{:.4}\n",
+                ch.gain_db.clamp(-24.0, 8.0),
+                ch.pan.clamp(-1.0, 1.0)
+            ));
+        }
+    }
+
     std::fs::write(path, content)
         .map_err(|e| format!("Impossibile salvare il preset '{}': {e}", path.display()))
 }
 
 /// Carica un file `.seqpreset` (`key=value`) restituendo una configurazione `DspParams` validata.
+#[allow(dead_code)]
 pub fn load_preset_file(path: &Path) -> Result<DspParams, String> {
+    load_preset_file_with_stems(path).map(|(p, _)| p)
+}
+
+/// Carica un file `.seqpreset` restituendo `(DspParams, Option<([StemEqParams; 4], [(f32, f32); 4])>)`.
+pub fn load_preset_file_with_stems(
+    path: &Path,
+) -> Result<(DspParams, Option<([StemEqParams; 4], [(f32, f32); 4])>), String> {
     let raw_text = std::fs::read_to_string(path)
         .map_err(|e| format!("Impossibile leggere il preset '{}': {e}", path.display()))?;
 
     let mut params = DspParams::preset_sala_prove();
+    let mut stem_eqs = [StemEqParams::default(); 4];
+    let mut stem_mix = [(0.0_f32, 0.0_f32); 4];
+    let mut has_stem_data = false;
     let mut recognized_keys = 0usize;
     let mut has_explicit_mud_flag = false;
     let mut has_explicit_exciter_flag = false;
@@ -344,6 +386,47 @@ pub fn load_preset_file(path: &Path) -> Result<DspParams, String> {
                     }
                 }
             }
+            other if other.starts_with("stem_") => {
+                let suffix = other.strip_prefix("stem_").unwrap_or("");
+                if let Some((idx_str, field)) = suffix.split_once('_') {
+                    if let Ok(s_idx) = idx_str.parse::<usize>() {
+                        if s_idx < 4 {
+                            let parts: Vec<&str> = val.split(',').map(|s| s.trim()).collect();
+                            match field {
+                                "eq" if parts.len() >= 3 => {
+                                    if let (Some(lo), Some(mi), Some(hi)) = (
+                                        parse_finite_f64(parts[0]),
+                                        parse_finite_f64(parts[1]),
+                                        parse_finite_f64(parts[2]),
+                                    ) {
+                                        stem_eqs[s_idx] = StemEqParams {
+                                            low_db: lo as f32,
+                                            mid_db: mi as f32,
+                                            high_db: hi as f32,
+                                        }
+                                        .clamped();
+                                        has_stem_data = true;
+                                        recognized_keys += 1;
+                                    }
+                                }
+                                "mix" if parts.len() >= 2 => {
+                                    if let (Some(g), Some(p)) =
+                                        (parse_finite_f64(parts[0]), parse_finite_f64(parts[1]))
+                                    {
+                                        stem_mix[s_idx] = (
+                                            (g as f32).clamp(-24.0_f32, 8.0_f32),
+                                            (p as f32).clamp(-1.0_f32, 1.0_f32),
+                                        );
+                                        has_stem_data = true;
+                                        recognized_keys += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -362,7 +445,13 @@ pub fn load_preset_file(path: &Path) -> Result<DspParams, String> {
         params.exciter_enabled = params.exciter_drive > 0.002_f64;
     }
 
-    Ok(params)
+    let stem_opt = if has_stem_data {
+        Some((stem_eqs, stem_mix))
+    } else {
+        None
+    };
+
+    Ok((params, stem_opt))
 }
 
 fn is_supported_audio_file(path: &Path) -> bool {
@@ -663,4 +752,112 @@ pub fn draw_drop_zone_overlay(ctx: &eframe::egui::Context) {
         FontId::proportional(13.0_f32),
         subtitle_color,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_stem_ch(low_db: f32, mid_db: f32, high_db: f32, gain_db: f32, pan: f32) -> StemChannel {
+        StemChannel {
+            name: "Test",
+            subtitle: "Test",
+            gain_db,
+            pan,
+            muted: false,
+            solo: false,
+            live_peak: 0.0,
+            eq: StemEqParams {
+                low_db,
+                mid_db,
+                high_db,
+            },
+        }
+    }
+
+    #[test]
+    fn preset_with_stems_roundtrip_and_stem_wav_export_apply_3band_eq() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "studioeq_stem_eq_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).expect("temp dir");
+
+        let params = DspParams::preset_stem_polish();
+        let chs = [
+            make_stem_ch(-2.0, 2.5, 3.0, 1.0, 0.0),
+            make_stem_ch(6.0, -3.5, 4.0, 0.5, -0.1),
+            make_stem_ch(4.5, 1.5, -1.0, 0.0, 0.0),
+            make_stem_ch(-1.5, 2.0, 2.5, -1.0, 0.25),
+        ];
+
+        let preset_path = tmp_dir.join("test_v2.seqpreset");
+        save_preset_file_with_stems(&params, Some(&chs), &preset_path).expect("save preset");
+        let (loaded_p, stem_opt) =
+            load_preset_file_with_stems(&preset_path).expect("load preset");
+        assert!((loaded_p.sub_cut_hz - params.sub_cut_hz).abs() < 1e-3);
+        let (loaded_eqs, loaded_mix) = stem_opt.expect("stem eq data present");
+        assert!((loaded_eqs[1].low_db - 6.0).abs() < 1e-3);
+        assert!((loaded_eqs[1].mid_db - (-3.5)).abs() < 1e-3);
+        assert!((loaded_eqs[1].high_db - 4.0).abs() < 1e-3);
+        assert!((loaded_mix[3].0 - (-1.0)).abs() < 1e-3);
+        assert!((loaded_mix[3].1 - 0.25).abs() < 1e-3);
+
+        // Verifica che `export_all_stems_wav` applichi effettivamente i Bassi (+9 dB a 60 Hz) sulla Batteria
+        let sr = 44100u32;
+        let frames = 4096usize;
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for n in 0..frames {
+            let s = 0.20_f32 * (2.0 * std::f32::consts::PI * 60.0 * (n as f32) / (sr as f32)).sin();
+            left.push(s);
+            right.push(s);
+        }
+        let buf = StereoBuffer::from_vecs(left, right, sr);
+        let stems = [buf.clone(), buf.clone(), buf.clone(), buf];
+        let flat_chs = [
+            make_stem_ch(0.0, 0.0, 0.0, 0.0, 0.0),
+            make_stem_ch(0.0, 0.0, 0.0, 0.0, 0.0),
+            make_stem_ch(0.0, 0.0, 0.0, 0.0, 0.0),
+            make_stem_ch(0.0, 0.0, 0.0, 0.0, 0.0),
+        ];
+        let boost_chs = [
+            make_stem_ch(0.0, 0.0, 0.0, 0.0, 0.0),
+            make_stem_ch(9.0, 0.0, 0.0, 0.0, 0.0),
+            make_stem_ch(0.0, 0.0, 0.0, 0.0, 0.0),
+            make_stem_ch(0.0, 0.0, 0.0, 0.0, 0.0),
+        ];
+
+        let dir_flat = tmp_dir.join("flat");
+        let dir_boost = tmp_dir.join("boost");
+        assert_eq!(export_all_stems_wav(&stems, &flat_chs, &dir_flat).unwrap(), 4);
+        assert_eq!(
+            export_all_stems_wav(&stems, &boost_chs, &dir_boost).unwrap(),
+            4
+        );
+
+        let read_rms = |p: &Path| -> f64 {
+            let mut r = hound::WavReader::open(p).unwrap();
+            let samples: Vec<i32> = r.samples::<i32>().skip(1024).map(|x| x.unwrap()).collect();
+            let sum_sq: f64 = samples
+                .iter()
+                .map(|&v| {
+                    let nf = (v as f64) / 8_388_607.0;
+                    nf * nf
+                })
+                .sum();
+            (sum_sq / (samples.len().max(1) as f64)).sqrt()
+        };
+
+        let rms_flat = read_rms(&dir_flat.join("02_Batteria_Mix.wav"));
+        let rms_boost = read_rms(&dir_boost.join("02_Batteria_Mix.wav"));
+        let gain_db = 20.0 * (rms_boost / rms_flat).log10();
+        assert!(
+            gain_db > 5.5,
+            "Expected > +5.5 dB low-shelf boost on exported drum stem, got {gain_db:.2} dB"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }

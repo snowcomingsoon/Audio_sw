@@ -1,5 +1,5 @@
 #define AppName "StudioEQ Master Pro"
-#define AppVersion "3.0.0"
+#define AppVersion "3.1.0"
 #define AppExe "StudioEQ_Master_Pro.exe"
 #define PythonHome GetEnv("LOCALAPPDATA") + "\\Programs\\Python\\Python312"
 #define FfmpegHome GetEnv("LOCALAPPDATA") + "\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-9.0.2-full_build\\bin"

@@ -338,7 +338,7 @@ pub fn sleek_progress_or_fader(
     desired_width: f32,
     height: f32,
 ) -> bool {
-    let alloc = Vec2::new(desired_width.max(40.0_f32), height.max(20.0_f32));
+    let alloc = Vec2::new(desired_width.max(40.0_f32), height.max(15.0_f32));
     let (rect, resp) = ui.allocate_exact_size(alloc, Sense::click_and_drag());
     let mut changed = false;
 
@@ -421,7 +421,12 @@ pub fn sleek_progress_or_fader(
         }
 
         // 3. Cursore satinato con ombra, alone e punto centrale colorato
-        let thumb_r = 7.2_f32 + 1.3_f32 * active_t;
+        let base_r = if rect.height() < 18.0_f32 {
+            6.0_f32
+        } else {
+            7.2_f32
+        };
+        let thumb_r = base_r + 1.1_f32 * active_t;
         let thumb_x = if rect.width() > thumb_r * 2.0_f32 {
             fill_x.clamp(rect.left() + thumb_r, rect.right() - thumb_r)
         } else {

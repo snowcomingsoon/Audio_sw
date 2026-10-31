@@ -43,10 +43,10 @@ use audio_io::{
 use auto_eq::analyze_and_compute_auto_eq;
 use bpm_stretch::{detect_bpm_fast, OriginalTempoRefs, MAX_USER_BPM, MIN_USER_BPM};
 use dsp::DspParams;
-use eq_drawer::{draw_eq_and_master_drawer, EqDrawerState};
+use eq_drawer::{draw_eq_and_master_drawer, EqDrawerState, EqDrawerTarget};
 use project_io::{
-    draw_drop_zone_overlay, export_all_stems_wav, extract_dropped_audio_path, load_preset_file,
-    save_preset_file,
+    draw_drop_zone_overlay, export_all_stems_wav, extract_dropped_audio_path,
+    load_preset_file_with_stems, save_preset_file_with_stems,
 };
 use shortcuts_and_meters::{draw_shortcuts_modal, poll_daw_shortcuts, UndoStack};
 use timeline_view::{
@@ -82,6 +82,7 @@ struct StudioEqApp {
     bg_status: Arc<Mutex<Option<String>>>,
 
     screenshot_target: Option<PathBuf>,
+    screenshot_focus_stem: Option<usize>,
     screenshot_requested: bool,
     ready_frames: u32,
 
@@ -197,7 +198,11 @@ impl StudioEqApp {
         ctx.set_style(style);
     }
 
-    fn new(cc: &eframe::CreationContext<'_>, screenshot_target: Option<PathBuf>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        screenshot_target: Option<PathBuf>,
+        screenshot_focus_stem: Option<usize>,
+    ) -> Self {
         Self::configure_modern_fonts_and_theme(&cc.egui_ctx);
 
         let engine = RealtimeAudioEngine::start().ok();
@@ -255,6 +260,7 @@ impl StudioEqApp {
             loading_busy: Arc::new(AtomicBool::new(false)),
             bg_status: Arc::new(Mutex::new(None)),
             screenshot_target,
+            screenshot_focus_stem,
             screenshot_requested: false,
             ready_frames: 0,
             fft_planner: FftPlanner::new(),
@@ -447,7 +453,7 @@ impl StudioEqApp {
                     }
                     if let Ok(mut m) = bg_msg.lock() {
                         *m = Some(
-                            "4 Tracce AI Separate attive in Timeline  •  Usa M / S / Volume / Pan o clicca Guidata per cambiare stile"
+                            "4 Tracce AI Separate attive  •  Regola Bassi / Medi / Alti su ogni traccia o clicca EQ"
                                 .to_string(),
                         );
                     }
@@ -627,6 +633,17 @@ impl StudioEqApp {
                     st.loop_enabled = false;
                     Ok("Selezione azzerata".to_string())
                 }
+                TimelineEditAction::FocusStemEq(idx) => {
+                    let s_idx = idx.min(3);
+                    self.show_eq_drawer = true;
+                    self.eq_ui.active_target = EqDrawerTarget::Stem(s_idx);
+                    st.mode = PlaybackSourceMode::FourStemMixer;
+                    let names = ["VOCE", "BATTERIA", "BASSO", "CHITARRE & ALTRO"];
+                    Ok(format!(
+                        "EQ 3-Bande attivo su {}  •  Regola Bassi, Medi e Alti (-12 .. +12 dB)",
+                        names[s_idx]
+                    ))
+                }
             }
         } else {
             return;
@@ -669,9 +686,11 @@ impl StudioEqApp {
                 ch.pan = 0.0_f32;
                 ch.muted = false;
                 ch.solo = false;
+                ch.eq.reset();
             }
             st.params_dirty = true;
         }
+        self.eq_ui.active_target = EqDrawerTarget::MasterBus;
         self.undo_stack.reset(initial_params);
         self.edit_history.clear();
         self.tempo_refs
@@ -917,6 +936,19 @@ impl eframe::App for StudioEqApp {
                 return;
             }
             if !self.loading_busy.load(Ordering::SeqCst) {
+                if self.ready_frames == 1 {
+                    if let Some(s_idx) = self.screenshot_focus_stem {
+                        let s = s_idx.min(3);
+                        self.eq_ui.active_target = EqDrawerTarget::Stem(s);
+                        if let Some(ref eng) = self.engine {
+                            if let Ok(mut st) = eng.state.lock() {
+                                st.stem_channels[s].eq.low_db = 3.8_f32;
+                                st.stem_channels[s].eq.mid_db = -2.4_f32;
+                                st.stem_channels[s].eq.high_db = 3.2_f32;
+                            }
+                        }
+                    }
+                }
                 self.ready_frames += 1;
                 if self.ready_frames >= 5 && !self.screenshot_requested {
                     self.screenshot_requested = true;
@@ -1179,6 +1211,7 @@ impl eframe::App for StudioEqApp {
                                 }
                                 st.params.bypass = false;
                                 st.params_dirty = true;
+                                self.eq_ui.active_target = EqDrawerTarget::MasterBus;
                             }
 
                             if pill_button(
@@ -1476,23 +1509,31 @@ impl eframe::App for StudioEqApp {
                             cyan,
                             Vec2::new(88.0_f32, 22.0_f32),
                         )
-                        .on_hover_text("Carica un preset di equalizzazione (.seqpreset)")
+                        .on_hover_text("Carica un preset di equalizzazione Master + Tracce Isolate (.seqpreset)")
                         .clicked()
                         {
                             if let Some(p) = rfd::FileDialog::new()
                                 .add_filter("Preset StudioEQ", &["seqpreset"])
                                 .pick_file()
                             {
-                                match load_preset_file(&p) {
-                                    Ok(loaded_p) => {
+                                match load_preset_file_with_stems(&p) {
+                                    Ok((loaded_p, stem_opt)) => {
                                         if let Some(ref eng) = self.engine {
                                             if let Ok(mut st) = eng.state.lock() {
                                                 st.params = loaded_p.clone();
+                                                if let Some((stem_eqs, stem_mix)) = stem_opt {
+                                                    for i in 0..4 {
+                                                        st.stem_channels[i].eq = stem_eqs[i];
+                                                        st.stem_channels[i].gain_db = stem_mix[i].0;
+                                                        st.stem_channels[i].pan = stem_mix[i].1;
+                                                    }
+                                                }
                                                 st.params_dirty = true;
                                             }
                                         }
                                         self.undo_stack.push_if_changed(&loaded_p);
-                                        self.status_msg = "Preset caricato con successo".to_string();
+                                        self.status_msg =
+                                            "Preset caricato (Master + EQ Tracce Isolate)".to_string();
                                     }
                                     Err(e) => self.status_msg = format!("Errore preset: {e}"),
                                 }
@@ -1505,7 +1546,7 @@ impl eframe::App for StudioEqApp {
                             cyan,
                             Vec2::new(82.0_f32, 22.0_f32),
                         )
-                        .on_hover_text("Salva la curva EQ attuale su disco (.seqpreset)")
+                        .on_hover_text("Salva la curva EQ Master e le impostazioni Bassi/Medi/Alti delle tracce isolate (.seqpreset)")
                         .clicked()
                         {
                             if let Some(p) = rfd::FileDialog::new()
@@ -1515,27 +1556,66 @@ impl eframe::App for StudioEqApp {
                             {
                                 if let Some(ref eng) = self.engine {
                                     if let Ok(st) = eng.state.lock() {
-                                        if let Err(e) = save_preset_file(&st.params, &p) {
+                                        if let Err(e) = save_preset_file_with_stems(
+                                            &st.params,
+                                            Some(&st.stem_channels),
+                                            &p,
+                                        ) {
                                             self.status_msg = format!("Errore salvataggio: {e}");
                                         } else {
-                                            self.status_msg = "Preset salvato".to_string();
+                                            self.status_msg =
+                                                "Preset salvato (Master + Tracce Isolate)".to_string();
                                         }
                                     }
                                 }
                             }
                         }
 
+                        let rem_w = ui.available_width();
                         if let Some(ref badge) = self.ai_badge_info {
-                            if footer_w >= 1020.0_f32 {
-                                ui.separator();
-                                ui.label(
-                                    RichText::new(badge)
-                                        .monospace()
-                                        .size(11.3_f32)
-                                        .color(StudioPalette::ELECTRIC_CYAN),
-                                );
+                            if footer_w >= 960.0_f32 && rem_w >= 140.0_f32 {
+                                let b_font = FontId::monospace(11.1_f32);
+                                let full_w = ui
+                                    .painter()
+                                    .layout_no_wrap(
+                                        badge.clone(),
+                                        b_font.clone(),
+                                        StudioPalette::ELECTRIC_CYAN,
+                                    )
+                                    .size()
+                                    .x;
+                                let shown_opt = if full_w + 26.0_f32 <= rem_w {
+                                    Some(badge.clone())
+                                } else {
+                                    let segs: Vec<&str> = badge.split("  •  ").collect();
+                                    let compact = if segs.len() >= 3 {
+                                        format!("{}  •  {}  •  {}", segs[0], segs[1], segs[segs.len() - 1])
+                                    } else {
+                                        segs.iter().take(2).copied().collect::<Vec<_>>().join("  •  ")
+                                    };
+                                    let comp_w = ui
+                                        .painter()
+                                        .layout_no_wrap(
+                                            compact.clone(),
+                                            b_font,
+                                            StudioPalette::ELECTRIC_CYAN,
+                                        )
+                                        .size()
+                                        .x;
+                                    (comp_w + 26.0_f32 <= rem_w).then_some(compact)
+                                };
+                                if let Some(shown_txt) = shown_opt {
+                                    ui.separator();
+                                    ui.label(
+                                        RichText::new(shown_txt)
+                                            .monospace()
+                                            .size(11.1_f32)
+                                            .color(StudioPalette::ELECTRIC_CYAN),
+                                    )
+                                    .on_hover_text(badge);
+                                }
                             }
-                        } else if footer_w >= 1180.0_f32 {
+                        } else if footer_w >= 1180.0_f32 && rem_w >= 470.0_f32 {
                             ui.separator();
                             ui.label(
                                 RichText::new(format!(
@@ -1590,10 +1670,15 @@ impl eframe::App for StudioEqApp {
                     .inner_margin(egui::Margin::symmetric(12, 8)),
             )
             .show(ctx, |ui| {
+                let active_stem_eq_idx = match (self.show_eq_drawer, self.eq_ui.active_target) {
+                    (true, EqDrawerTarget::Stem(i)) => Some(i),
+                    _ => None,
+                };
                 let edit_ctx = TimelineEditContext {
                     has_clipboard: self.clipboard.has_content(),
                     can_undo_edit: self.edit_history.can_undo(),
                     can_redo_edit: self.edit_history.can_redo(),
+                    active_stem_eq_idx,
                 };
                 if let Some(ref eng) = self.engine {
                     if let Ok(mut st) = eng.state.lock() {
@@ -1622,11 +1707,16 @@ impl eframe::App for StudioEqApp {
 
 fn main() -> eframe::Result<()> {
     let mut screenshot_target: Option<PathBuf> = None;
+    let mut screenshot_focus_stem: Option<usize> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--screenshot" {
             if let Some(p) = args.next() {
                 screenshot_target = Some(PathBuf::from(p));
+            }
+        } else if arg == "--focus-stem" {
+            if let Some(v) = args.next() {
+                screenshot_focus_stem = v.parse::<usize>().ok();
             }
         }
     }
@@ -1645,6 +1735,12 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "StudioEQ Master Pro",
         native_options,
-        Box::new(move |cc| Ok(Box::new(StudioEqApp::new(cc, screenshot_target)))),
+        Box::new(move |cc| {
+            Ok(Box::new(StudioEqApp::new(
+                cc,
+                screenshot_target,
+                screenshot_focus_stem,
+            )))
+        }),
     )
 }

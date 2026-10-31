@@ -1,6 +1,6 @@
 [package]
 name = "studio_eq_master_pro"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 description = "Studio Parametric EQ, AI Stem Mixer & Sala Prove Mastering Suite"
 

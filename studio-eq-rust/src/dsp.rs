@@ -6,7 +6,59 @@ pub enum FilterKind {
     Peaking,
     HighPass,
     LowPass,
+    LowShelf,
     HighShelf,
+}
+
+pub const STEM_EQ_MIN_DB: f32 = -12.0_f32;
+pub const STEM_EQ_MAX_DB: f32 = 12.0_f32;
+
+/// Equalizzatore dedicato a 3 bande musicali (Bassi / Medi / Alti) per ciascuna traccia isolata.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StemEqParams {
+    pub low_db: f32,
+    pub mid_db: f32,
+    pub high_db: f32,
+}
+
+impl StemEqParams {
+    #[inline]
+    pub fn is_flat(&self) -> bool {
+        self.low_db.abs() < 0.01_f32
+            && self.mid_db.abs() < 0.01_f32
+            && self.high_db.abs() < 0.01_f32
+    }
+
+    #[inline]
+    pub fn reset(&mut self) {
+        self.low_db = 0.0_f32;
+        self.mid_db = 0.0_f32;
+        self.high_db = 0.0_f32;
+    }
+
+    #[inline]
+    pub fn clamped(&self) -> Self {
+        Self {
+            low_db: self.low_db.clamp(STEM_EQ_MIN_DB, STEM_EQ_MAX_DB),
+            mid_db: self.mid_db.clamp(STEM_EQ_MIN_DB, STEM_EQ_MAX_DB),
+            high_db: self.high_db.clamp(STEM_EQ_MIN_DB, STEM_EQ_MAX_DB),
+        }
+    }
+}
+
+/// Restituisce `((low_hz, low_q), (mid_hz, mid_q), (high_hz, high_q))` calibrati sullo strumento isolato:
+/// - `0` Voce: Calore 135 Hz | Presenza 1.65 kHz | Aria 6.5 kHz
+/// - `1` Batteria: Cassa/Doppio Pedale 95 Hz | Corpo/Scatola 1.1 kHz | Punta/Piatti 5.2 kHz
+/// - `2` Basso: Sub 85 Hz | Articolazione 780 Hz | Corde 3.2 kHz
+/// - `3` Chitarre & Altro: Corpo 120 Hz | Morso 1.35 kHz | Brillantezza 5.8 kHz
+#[inline]
+pub fn stem_eq_band_specs(stem_idx: usize) -> ((f64, f64), (f64, f64), (f64, f64)) {
+    match stem_idx {
+        0 => ((135.0, 0.707), (1650.0, 0.85), (6500.0, 0.707)),
+        1 => ((95.0, 0.72), (1100.0, 0.80), (5200.0, 0.707)),
+        2 => ((85.0, 0.72), (780.0, 0.90), (3200.0, 0.707)),
+        _ => ((120.0, 0.707), (1350.0, 0.85), (5800.0, 0.707)),
+    }
 }
 
 #[allow(dead_code)]
@@ -253,6 +305,17 @@ impl BiquadCoeffs {
                 -2.0 * cos_w0,
                 1.0 - alpha,
             ),
+            FilterKind::LowShelf => {
+                let sq_a = a_amp.sqrt();
+                (
+                    a_amp * ((a_amp + 1.0) - (a_amp - 1.0) * cos_w0 + 2.0 * sq_a * alpha),
+                    2.0 * a_amp * ((a_amp - 1.0) - (a_amp + 1.0) * cos_w0),
+                    a_amp * ((a_amp + 1.0) - (a_amp - 1.0) * cos_w0 - 2.0 * sq_a * alpha),
+                    (a_amp + 1.0) + (a_amp - 1.0) * cos_w0 + 2.0 * sq_a * alpha,
+                    -2.0 * ((a_amp - 1.0) + (a_amp + 1.0) * cos_w0),
+                    (a_amp + 1.0) + (a_amp - 1.0) * cos_w0 - 2.0 * sq_a * alpha,
+                )
+            }
             FilterKind::HighShelf => {
                 let sq_a = a_amp.sqrt();
                 (
@@ -341,6 +404,106 @@ pub fn total_curve_db(params: &DspParams, freq: f64, sr: f64) -> f64 {
         }
     }
     sum_db
+}
+
+/// Risposta in frequenza combinata (dB) dell'EQ a 3 bande (Bassi / Medi / Alti) di uno Stem isolato.
+pub fn stem_eq_curve_db(stem_idx: usize, eq: &StemEqParams, freq: f64, sr: f64) -> f64 {
+    let eq_c = eq.clamped();
+    if eq_c.is_flat() {
+        return 0.0;
+    }
+    let ((low_hz, low_q), (mid_hz, mid_q), (high_hz, high_q)) = stem_eq_band_specs(stem_idx);
+    let mut sum_db = 0.0_f64;
+    if eq_c.low_db.abs() >= 0.01 {
+        let c = BiquadCoeffs::design(FilterKind::LowShelf, low_hz, sr, eq_c.low_db as f64, low_q);
+        sum_db += c.magnitude_db(freq, sr);
+    }
+    if eq_c.mid_db.abs() >= 0.01 {
+        let c = BiquadCoeffs::design(FilterKind::Peaking, mid_hz, sr, eq_c.mid_db as f64, mid_q);
+        sum_db += c.magnitude_db(freq, sr);
+    }
+    if eq_c.high_db.abs() >= 0.01 {
+        let c = BiquadCoeffs::design(
+            FilterKind::HighShelf,
+            high_hz,
+            sr,
+            eq_c.high_db as f64,
+            high_q,
+        );
+        sum_db += c.magnitude_db(freq, sr);
+    }
+    sum_db
+}
+
+/// Catena biquad a 64-bit real-time dedicata ai controlli Bassi / Medi / Alti di ciascuna traccia isolata.
+/// Quando `eq.is_flat()` è `true`, esegue pass-through bit-exact a costo zero CPU.
+#[derive(Clone, Copy)]
+pub struct StemThreeBandChain {
+    sr: f64,
+    flat: bool,
+    low_bq: StereoBiquad,
+    mid_bq: StereoBiquad,
+    high_bq: StereoBiquad,
+}
+
+impl StemThreeBandChain {
+    pub fn new(sr: f64, stem_idx: usize, eq: &StemEqParams) -> Self {
+        let mut s = Self {
+            sr: sr.max(8000.0),
+            flat: true,
+            low_bq: StereoBiquad::default(),
+            mid_bq: StereoBiquad::default(),
+            high_bq: StereoBiquad::default(),
+        };
+        s.update_coefficients(stem_idx, eq);
+        s
+    }
+
+    pub fn update_coefficients(&mut self, stem_idx: usize, eq: &StemEqParams) {
+        let eq_c = eq.clamped();
+        let was_flat = self.flat;
+        self.flat = eq_c.is_flat();
+        if self.flat {
+            if !was_flat {
+                self.reset_state();
+            }
+            return;
+        }
+        let ((low_hz, low_q), (mid_hz, mid_q), (high_hz, high_q)) = stem_eq_band_specs(stem_idx);
+        self.low_bq.coeffs =
+            BiquadCoeffs::design(FilterKind::LowShelf, low_hz, self.sr, eq_c.low_db as f64, low_q);
+        self.mid_bq.coeffs =
+            BiquadCoeffs::design(FilterKind::Peaking, mid_hz, self.sr, eq_c.mid_db as f64, mid_q);
+        self.high_bq.coeffs = BiquadCoeffs::design(
+            FilterKind::HighShelf,
+            high_hz,
+            self.sr,
+            eq_c.high_db as f64,
+            high_q,
+        );
+    }
+
+    pub fn reset_state(&mut self) {
+        self.low_bq.reset();
+        self.mid_bq.reset();
+        self.high_bq.reset();
+    }
+
+    #[inline]
+    pub fn process_frame(&mut self, in_l: f32, in_r: f32) -> (f32, f32) {
+        if self.flat {
+            return (in_l, in_r);
+        }
+        let mut l = (in_l as f64) + 1e-24;
+        let mut r = (in_r as f64) + 1e-24;
+        (l, r) = self.low_bq.process(l, r);
+        (l, r) = self.mid_bq.process(l, r);
+        (l, r) = self.high_bq.process(l, r);
+        if !l.is_finite() || !r.is_finite() {
+            return (0.0, 0.0);
+        }
+        (l as f32, r as f32)
+    }
 }
 
 #[inline]
@@ -653,5 +816,37 @@ mod argon_verification {
         assert_eq!(ol, 0.37);
         assert_eq!(or, -0.42);
         assert_eq!(chain.last_gain_reduction_db, 0.0);
+    }
+
+    #[test]
+    fn verify_stem_three_band_eq_and_low_shelf() {
+        let sr = 48_000.0;
+        let ls = BiquadCoeffs::design(FilterKind::LowShelf, 100.0, sr, 6.0, 0.707);
+        assert!((ls.magnitude_db(20.0, sr) - 6.0).abs() < 0.25);
+        assert!(ls.magnitude_db(12_000.0, sr).abs() < 0.05);
+
+        // Flat pass-through bit-exact
+        let flat_eq = StemEqParams::default();
+        assert!(flat_eq.is_flat());
+        let mut ch_flat = StemThreeBandChain::new(sr, 1, &flat_eq);
+        assert_eq!(ch_flat.process_frame(0.5125, -0.3125), (0.5125, -0.3125));
+
+        // Batteria (stem 1): +6 dB Bassi, -4 dB Medi, +5 dB Alti
+        let drum_eq = StemEqParams {
+            low_db: 6.0,
+            mid_db: -4.0,
+            high_db: 5.0,
+        };
+        assert!(stem_eq_curve_db(1, &drum_eq, 35.0, sr) > 5.2);
+        assert!(stem_eq_curve_db(1, &drum_eq, 1100.0, sr) < -3.2);
+        assert!(stem_eq_curve_db(1, &drum_eq, 14_000.0, sr) > 4.4);
+
+        let mut ch_drum = StemThreeBandChain::new(sr, 1, &drum_eq);
+        for n in 0..2048 {
+            let t = n as f64 / sr;
+            let s = (0.35 * (2.0 * PI * 60.0 * t).sin()) as f32;
+            let (ol, or) = ch_drum.process_frame(s, -s);
+            assert!(ol.is_finite() && or.is_finite());
+        }
     }
 }

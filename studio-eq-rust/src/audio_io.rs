@@ -19,7 +19,9 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-use crate::dsp::{BiquadCoeffs, DspParams, FilterKind, StudioDspChain};
+use crate::dsp::{
+    BiquadCoeffs, DspParams, FilterKind, StemEqParams, StemThreeBandChain, StudioDspChain,
+};
 
 /// Cache multi-risoluzione (Peak + RMS) per disegnare forme d'onda fluide a 60 FPS stile DAW moderna.
 #[derive(Clone, Debug)]
@@ -478,6 +480,7 @@ pub struct StemChannel {
     pub subtitle: &'static str,
     pub gain_db: f32,
     pub pan: f32, // -1.0 (Left) .. 0.0 (Center) .. +1.0 (Right)
+    pub eq: StemEqParams,
     pub muted: bool,
     pub solo: bool,
     pub live_peak: f32,
@@ -527,6 +530,7 @@ impl SharedAudioState {
                     subtitle: "De-Noise + Vocal Strip",
                     gain_db: 0.0,
                     pan: 0.0,
+                    eq: StemEqParams::default(),
                     muted: false,
                     solo: false,
                     live_peak: 0.0,
@@ -536,6 +540,7 @@ impl SharedAudioState {
                     subtitle: "Punch 62Hz + Anti-Box",
                     gain_db: 0.0,
                     pan: 0.0,
+                    eq: StemEqParams::default(),
                     muted: false,
                     solo: false,
                     live_peak: 0.0,
@@ -545,6 +550,7 @@ impl SharedAudioState {
                     subtitle: "Mono Sub + Anti-Mud",
                     gain_db: 0.0,
                     pan: 0.0,
+                    eq: StemEqParams::default(),
                     muted: false,
                     solo: false,
                     live_peak: 0.0,
@@ -554,6 +560,7 @@ impl SharedAudioState {
                     subtitle: "Body 1.4kHz + Stereo Wide",
                     gain_db: 0.0,
                     pan: 0.0,
+                    eq: StemEqParams::default(),
                     muted: false,
                     solo: false,
                     live_peak: 0.0,
@@ -612,6 +619,10 @@ impl RealtimeAudioEngine {
 
         let stream_config: cpal::StreamConfig = config.into();
         let mut dsp = StudioDspChain::new(device_sr as f64, &DspParams::preset_sala_prove());
+        let mut last_stem_eq = [StemEqParams::default(); 4];
+        let mut stem_eq_chains: [StemThreeBandChain; 4] = std::array::from_fn(|i| {
+            StemThreeBandChain::new(device_sr as f64, i, &StemEqParams::default())
+        });
 
         let stream = device
             .build_output_stream(
@@ -628,6 +639,12 @@ impl RealtimeAudioEngine {
                     if st.params_dirty {
                         dsp.update_coefficients(&st.params);
                         st.params_dirty = false;
+                    }
+                    for i in 0..4 {
+                        if st.stem_channels[i].eq != last_stem_eq[i] {
+                            last_stem_eq[i] = st.stem_channels[i].eq;
+                            stem_eq_chains[i].update_coefficients(i, &last_stem_eq[i]);
+                        }
                     }
 
                     if !st.playing || st.active_length() == 0 {
@@ -702,10 +719,15 @@ impl RealtimeAudioEngine {
                                         if stems[i].is_empty() {
                                             continue;
                                         }
-                                        let idx = pos.min(stems[i].len() - 1);
                                         let (g, pl, pr) = stem_cfg[i];
-                                        let l_s = stems[i].left[idx] * g * pl;
-                                        let r_s = stems[i].right[idx] * g * pr;
+                                        if g <= 0.0_f32 {
+                                            continue;
+                                        }
+                                        let idx = pos.min(stems[i].len() - 1);
+                                        let (eq_l, eq_r) = stem_eq_chains[i]
+                                            .process_frame(stems[i].left[idx], stems[i].right[idx]);
+                                        let l_s = eq_l * g * pl;
+                                        let r_s = eq_r * g * pr;
                                         stem_peaks[i] =
                                             stem_peaks[i].max(l_s.abs().max(r_s.abs()));
                                         sl += l_s;
@@ -808,6 +830,8 @@ pub fn export_session(
     }
 
     let mut dsp = StudioDspChain::new(sr as f64, params);
+    let mut stem_eq_chains: [StemThreeBandChain; 4] =
+        std::array::from_fn(|i| StemThreeBandChain::new(sr as f64, i, &stem_channels[i].eq));
     let any_solo = stem_channels.iter().any(|c| c.solo);
     let stem_cfg: [(f32, f32, f32); 4] = std::array::from_fn(|i| {
         let ch = &stem_channels[i];
@@ -853,10 +877,15 @@ pub fn export_session(
                         if st_arr[k].is_empty() {
                             continue;
                         }
-                        let idx = i.min(st_arr[k].len() - 1);
                         let (g, pl, pr) = stem_cfg[k];
-                        sl += st_arr[k].left[idx] * g * pl;
-                        sr_v += st_arr[k].right[idx] * g * pr;
+                        if g <= 0.0_f32 {
+                            continue;
+                        }
+                        let idx = i.min(st_arr[k].len() - 1);
+                        let (eq_l, eq_r) = stem_eq_chains[k]
+                            .process_frame(st_arr[k].left[idx], st_arr[k].right[idx]);
+                        sl += eq_l * g * pl;
+                        sr_v += eq_r * g * pr;
                     }
                     (sl * 0.82, sr_v * 0.82)
                 } else {

@@ -4,9 +4,10 @@ use eframe::egui::{
 };
 
 use crate::audio_io::{PlaybackSourceMode, SharedAudioState, StemChannel, StereoBuffer};
+use crate::dsp::{stem_eq_band_specs, STEM_EQ_MAX_DB, STEM_EQ_MIN_DB};
 use crate::ui_widgets::{brighten, sleek_progress_or_fader};
 
-const HEADER_WIDTH: f32 = 215.0_f32;
+const HEADER_WIDTH: f32 = 268.0_f32;
 const RULER_HEIGHT: f32 = 26.0_f32;
 const COL_GAP: f32 = 6.0_f32;
 const LANE_GAP: f32 = 4.5_f32;
@@ -14,6 +15,7 @@ const MIN_ZOOM: f32 = 1.0_f32;
 const MAX_ZOOM: f32 = 24.0_f32;
 
 const STEM_LABELS: [&str; 4] = ["VOCE", "BATTERIA", "BASSO", "CHITARRE & ALTRO"];
+#[allow(dead_code)]
 const STEM_SUBTITLES_IT: [&str; 4] = [
     "Pulizia Voce + Presenza",
     "Spinta Cassa + Anti-Scatola",
@@ -52,6 +54,7 @@ pub enum TimelineEditAction {
     UndoAudioEdit,
     RedoAudioEdit,
     ClearSelection,
+    FocusStemEq(usize),
 }
 
 /// Stato live passato dal controller principale alla Barra Strumenti Editing Audio.
@@ -60,6 +63,7 @@ pub struct TimelineEditContext {
     pub has_clipboard: bool,
     pub can_undo_edit: bool,
     pub can_redo_edit: bool,
+    pub active_stem_eq_idx: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -750,11 +754,11 @@ pub fn draw_multitrack_timeline(
                         360.0_f32
                     };
                     let raw_lane_h = ((avail_h - 3.0_f32 * LANE_GAP) / 4.0_f32).floor();
-                    let needs_vscroll = raw_lane_h < 66.0_f32;
+                    let needs_vscroll = raw_lane_h < 72.0_f32;
                     let lane_h = if needs_vscroll {
-                        68.0_f32
+                        78.0_f32
                     } else {
-                        raw_lane_h.clamp(66.0_f32, 114.0_f32)
+                        raw_lane_h.clamp(72.0_f32, 122.0_f32)
                     };
 
                     if needs_vscroll {
@@ -775,6 +779,8 @@ pub fn draw_multitrack_timeline(
                                     total_frames,
                                     &major_tick_xs,
                                     &mut last_wave_bottom,
+                                    edit_ctx.active_stem_eq_idx,
+                                    &mut triggered_action,
                                 );
                             });
                         last_wave_bottom = last_wave_bottom.min(viewport_bottom_limit);
@@ -790,6 +796,8 @@ pub fn draw_multitrack_timeline(
                             total_frames,
                             &major_tick_xs,
                             &mut last_wave_bottom,
+                            edit_ctx.active_stem_eq_idx,
+                            &mut triggered_action,
                         );
                     }
                 } else {
@@ -908,10 +916,13 @@ fn draw_four_stem_lanes(
     total_frames: usize,
     major_tick_xs: &[f32],
     last_wave_bottom: &mut f32,
+    active_stem_eq_idx: Option<usize>,
+    out_action: &mut Option<TimelineEditAction>,
 ) {
     for idx in 0..4 {
         let accent = stem_accent_color(idx);
         let label = STEM_LABELS[idx];
+        let focused_eq = active_stem_eq_idx == Some(idx);
 
         ui.horizontal(|ui| {
             let any_solo_before = state.stem_channels.iter().any(|c| c.solo);
@@ -921,17 +932,22 @@ fn draw_four_stem_lanes(
                 state.stem_channels[idx].muted
             };
 
-            let touched = draw_stem_track_header(
+            let (touched, focus_clicked) = draw_stem_track_header(
                 ui,
                 idx,
                 lane_h,
                 label,
                 accent,
                 silenced_before,
+                focused_eq,
                 &mut state.stem_channels[idx],
             );
             if touched {
                 state.mode = PlaybackSourceMode::FourStemMixer;
+            }
+            if focus_clicked {
+                state.mode = PlaybackSourceMode::FourStemMixer;
+                *out_action = Some(TimelineEditAction::FocusStemEq(idx));
             }
 
             let any_solo = state.stem_channels.iter().any(|c| c.solo);
@@ -1118,7 +1134,7 @@ fn draw_ruler_corner_box(
         ui.horizontal(|ui| {
             ui.add_space(7.0_f32);
             let (tc_rect, tc_resp) =
-                ui.allocate_exact_size(Vec2::new(108.0_f32, 18.0_f32), Sense::hover());
+                ui.allocate_exact_size(Vec2::new(158.0_f32, 18.0_f32), Sense::hover());
             ui.painter().text(
                 Pos2::new(tc_rect.left(), tc_rect.center().y),
                 Align2::LEFT_CENTER,
@@ -1330,8 +1346,181 @@ fn format_ruler_time(sec: f32, sub_second: bool) -> String {
     }
 }
 
-/// Intestazione sinistra di uno Stem (`215px` larghezza, card `#151C2B`, altezza adattiva senza clipping).
-/// Restituisce `true` se l'utente ha modificato Mute, Solo, Volume o Pan.
+fn stem_eq_band_tooltip_it(stem_idx: usize, band_idx: usize) -> String {
+    let ((low_hz, _), (mid_hz, _), (high_hz, _)) = stem_eq_band_specs(stem_idx);
+    let stem_name = STEM_LABELS[stem_idx.min(3)];
+    let (band_name, hz, role) = match (stem_idx.min(3), band_idx) {
+        (0, 0) => ("Bassi", low_hz, "Controlla calore vocale o asciuga rientri bassi della sala"),
+        (0, 1) => ("Medi", mid_hz, "Controlla presenza e intelligibilità delle parole"),
+        (0, _) => ("Alti", high_hz, "Controlla aria, apertura e brillantezza della voce"),
+        (1, 0) => ("Bassi", low_hz, "Controlla corpo, sub e spinta di Cassa e Timpano"),
+        (1, 1) => ("Medi", mid_hz, "Controlla attacco rullante/tom o riduce l'effetto scatola"),
+        (1, _) => ("Alti", high_hz, "Controlla punta cassa, cordiera e brillantezza piatti"),
+        (2, 0) => ("Bassi", low_hz, "Controlla profondità sub e fondamentale del Basso"),
+        (2, 1) => ("Medi", mid_hz, "Controlla definizione delle note e attacco dita/plettro"),
+        (2, _) => ("Alti", high_hz, "Controlla presenza metallica delle corde nel mix"),
+        (_, 0) => ("Bassi", low_hz, "Controlla corpo e spessore delle Chitarre"),
+        (_, 1) => ("Medi", mid_hz, "Controlla grinta, morso e presenza sulle medie"),
+        (_, _) => ("Alti", high_hz, "Controlla brillantezza, definizione e apertura armonica"),
+    };
+    let hz_str = if hz >= 1000.0 {
+        format!("{:.2} kHz", hz / 1000.0)
+    } else {
+        format!("{:.0} Hz", hz)
+    };
+    format!(
+        "{band_name} — {stem_name} ({hz_str})\n\
+         {role} ({STEM_EQ_MIN_DB:+.0} .. {STEM_EQ_MAX_DB:+.0} dB)\n\
+         • Trascina su/giù o destra/sinistra (Shift = precisione)\n\
+         • Clic singolo: mostra curva EQ nel pannello in basso\n\
+         • Doppio clic o Tasto destro: riporta a 0.0 dB"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_stem_eq_mini_band(
+    ui: &mut Ui,
+    label: &str,
+    val_db: &mut f32,
+    accent: Color32,
+    is_silenced: bool,
+    width: f32,
+    height: f32,
+    tooltip: &str,
+) -> (bool, bool) {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(width, height), Sense::click_and_drag());
+    let mut changed = false;
+    let mut clicked_focus = false;
+
+    if resp.double_clicked() || resp.secondary_clicked() {
+        if val_db.abs() > 1e-4_f32 {
+            *val_db = 0.0_f32;
+            changed = true;
+        }
+    } else if resp.dragged() {
+        let delta = resp.drag_delta().x - resp.drag_delta().y;
+        if delta.abs() > 0.0_f32 {
+            let speed = if ui.input(|i| i.modifiers.shift) {
+                0.035_f32
+            } else {
+                0.13_f32
+            };
+            *val_db = (*val_db + delta * speed).clamp(STEM_EQ_MIN_DB, STEM_EQ_MAX_DB);
+            changed = true;
+            clicked_focus = true;
+        }
+    } else if resp.clicked() {
+        clicked_focus = true;
+    }
+
+    if ui.is_rect_visible(rect) {
+        let active = val_db.abs() >= 0.05_f32;
+        let hovered = resp.hovered() || resp.dragged();
+        let radius = CornerRadius::same(5);
+
+        let eff_col = if is_silenced {
+            Color32::from_rgb(100, 116, 139)
+        } else if *val_db < -0.05_f32 {
+            Color32::from_rgb(56, 189, 248)
+        } else {
+            accent
+        };
+
+        let bg = if resp.dragged() {
+            Color32::from_rgb(24, 33, 52)
+        } else if hovered {
+            Color32::from_rgb(19, 26, 41)
+        } else {
+            Color32::from_rgb(13, 18, 29)
+        };
+        let border = if resp.dragged() || (active && hovered) {
+            brighten(eff_col, 24)
+        } else if active {
+            Color32::from_rgba_unmultiplied(eff_col.r(), eff_col.g(), eff_col.b(), 155)
+        } else if hovered {
+            Color32::from_rgb(64, 82, 114)
+        } else {
+            Color32::from_rgb(33, 44, 65)
+        };
+
+        ui.painter().rect_filled(rect, radius, bg);
+        ui.painter()
+            .rect_stroke(rect, radius, Stroke::new(1.0_f32, border), StrokeKind::Inside);
+
+        // Barra bipolare inferiore (-12 .. 0 .. +12 dB)
+        let bar_y0 = rect.bottom() - 3.2_f32;
+        let bar_bg = Rect::from_min_max(
+            Pos2::new(rect.left() + 3.0_f32, bar_y0),
+            Pos2::new(rect.right() - 3.0_f32, rect.bottom() - 1.2_f32),
+        );
+        ui.painter()
+            .rect_filled(bar_bg, CornerRadius::same(1), Color32::from_rgb(24, 32, 48));
+        let cx = bar_bg.center().x;
+        let norm = (*val_db / STEM_EQ_MAX_DB).clamp(-1.0_f32, 1.0_f32);
+        let px = cx + norm * (bar_bg.width() * 0.5_f32);
+        if (px - cx).abs() > 0.6_f32 {
+            let fill_r = Rect::from_min_max(
+                Pos2::new(cx.min(px), bar_bg.top()),
+                Pos2::new(cx.max(px), bar_bg.bottom()),
+            );
+            ui.painter()
+                .rect_filled(fill_r, CornerRadius::same(1), eff_col);
+        }
+
+        let text_y = rect.top() + (rect.height() - 3.0_f32) * 0.5_f32;
+        let lbl_col = if active {
+            Color32::from_rgb(214, 224, 238)
+        } else {
+            Color32::from_rgb(138, 153, 178)
+        };
+        ui.painter().text(
+            Pos2::new(rect.left() + 4.5_f32, text_y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(9.7_f32),
+            lbl_col,
+        );
+
+        let val_str = if active {
+            format!("{:+.1}", *val_db)
+        } else {
+            "0.0".to_string()
+        };
+        let val_col = if active {
+            if is_silenced {
+                Color32::from_rgb(165, 178, 198)
+            } else {
+                brighten(eff_col, 28)
+            }
+        } else {
+            Color32::from_rgb(104, 118, 142)
+        };
+        ui.painter().text(
+            Pos2::new(rect.right() - 4.5_f32, text_y),
+            Align2::RIGHT_CENTER,
+            val_str,
+            FontId::monospace(9.4_f32),
+            val_col,
+        );
+    }
+
+    if resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if !resp.dragged() && !tooltip.is_empty() {
+        resp.on_hover_text(tooltip);
+    }
+
+    (changed, clicked_focus)
+}
+
+/// Intestazione sinistra di uno Stem (`268px` larghezza, card `#151C2B`, altezza adattiva senza clipping).
+/// Include Mute, Solo, Volume, Pan e controlli dedicati `Bassi / Medi / Alti` (`-12 .. +12 dB`) + `EQ`.
+/// Restituisce `(touched_audio, focus_stem_eq_clicked)`.
+#[allow(clippy::too_many_arguments)]
 fn draw_stem_track_header(
     ui: &mut Ui,
     idx: usize,
@@ -1339,242 +1528,300 @@ fn draw_stem_track_header(
     title: &str,
     accent: Color32,
     is_silenced: bool,
+    focused_eq: bool,
     ch: &mut StemChannel,
-) -> bool {
+) -> (bool, bool) {
     let mut touched = false;
+    let mut focus_clicked = false;
 
-    ui.allocate_ui(Vec2::new(HEADER_WIDTH, lane_h), |ui| {
-        ui.set_min_size(Vec2::new(HEADER_WIDTH, lane_h));
-        ui.set_max_size(Vec2::new(HEADER_WIDTH, lane_h));
-        ui.spacing_mut().item_spacing = Vec2::new(4.0_f32, 0.0_f32);
+    ui.allocate_ui_with_layout(
+        Vec2::new(HEADER_WIDTH, lane_h),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_min_size(Vec2::new(HEADER_WIDTH, lane_h));
+            ui.set_max_size(Vec2::new(HEADER_WIDTH, lane_h));
+            ui.spacing_mut().item_spacing = Vec2::new(4.0_f32, 0.0_f32);
 
-        let card_rect = Rect::from_min_size(ui.max_rect().min, Vec2::new(HEADER_WIDTH, lane_h));
-        let radius = CornerRadius::same(8);
+            let card_rect = Rect::from_min_size(ui.max_rect().min, Vec2::new(HEADER_WIDTH, lane_h));
+            let radius = CornerRadius::same(8);
 
-        // Sfondo card #151C2B + barra verticale colorata a sinistra (4px)
-        ui.painter()
-            .rect_filled(card_rect, radius, Color32::from_rgb(21, 28, 43));
-        ui.painter().rect_stroke(
-            card_rect,
-            radius,
-            Stroke::new(1.0_f32, Color32::from_rgb(35, 46, 68)),
-            StrokeKind::Inside,
-        );
+            // Sfondo card #151C2B + barra verticale colorata a sinistra (4px)
+            ui.painter()
+                .rect_filled(card_rect, radius, Color32::from_rgb(21, 28, 43));
+            let card_border = if focused_eq {
+                Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 145)
+            } else {
+                Color32::from_rgb(35, 46, 68)
+            };
+            ui.painter().rect_stroke(
+                card_rect,
+                radius,
+                Stroke::new(1.0_f32, card_border),
+                StrokeKind::Inside,
+            );
 
-        let bar_col = if is_silenced {
-            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 75)
-        } else {
-            accent
-        };
-        let left_bar = Rect::from_min_max(
-            card_rect.min,
-            Pos2::new(card_rect.left() + 4.0_f32, card_rect.bottom()),
-        );
-        ui.painter().rect_filled(
-            left_bar,
-            CornerRadius {
-                nw: 8,
-                sw: 8,
-                ne: 0,
-                se: 0,
-            },
-            bar_col,
-        );
+            let bar_col = if is_silenced {
+                Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 75)
+            } else {
+                accent
+            };
+            let left_bar = Rect::from_min_max(
+                card_rect.min,
+                Pos2::new(card_rect.left() + 4.0_f32, card_rect.bottom()),
+            );
+            ui.painter().rect_filled(
+                left_bar,
+                CornerRadius {
+                    nw: 8,
+                    sw: 8,
+                    ne: 0,
+                    se: 0,
+                },
+                bar_col,
+            );
 
-        // Mini LED Meter verticale live sul bordo destro della card
-        let meter_pad_y = if lane_h < 76.0_f32 { 6.5_f32 } else { 8.5_f32 };
-        let meter_rect = Rect::from_min_max(
-            Pos2::new(card_rect.right() - 13.0_f32, card_rect.top() + meter_pad_y),
-            Pos2::new(card_rect.right() - 6.0_f32, card_rect.bottom() - meter_pad_y),
-        );
-        let shown_peak = if is_silenced { 0.0_f32 } else { ch.live_peak };
-        draw_vertical_led_meter(ui.painter(), meter_rect, shown_peak);
+            // Mini LED Meter verticale live sul bordo destro della card
+            let meter_pad_y = if lane_h < 84.0_f32 { 5.5_f32 } else { 7.5_f32 };
+            let meter_rect = Rect::from_min_max(
+                Pos2::new(card_rect.right() - 13.0_f32, card_rect.top() + meter_pad_y),
+                Pos2::new(card_rect.right() - 6.0_f32, card_rect.bottom() - meter_pad_y),
+            );
+            let shown_peak = if is_silenced { 0.0_f32 } else { ch.live_peak };
+            draw_vertical_led_meter(ui.painter(), meter_rect, shown_peak);
 
-        // Centratura verticale adattiva (nasconde il sottotitolo secondario sotto 84px per evitare qualsiasi taglio)
-        let show_subtitle = lane_h >= 84.0_f32;
-        let (row_gap, top_pad) = if show_subtitle {
-            let gap = ((lane_h - 73.0_f32) / 3.0_f32).clamp(1.5_f32, 4.5_f32);
-            let used = 18.0_f32 + 11.0_f32 + 20.0_f32 + 16.0_f32 + 3.0_f32 * gap;
-            (gap, ((lane_h - used) * 0.5_f32).max(3.0_f32))
-        } else {
-            let gap = ((lane_h - 60.0_f32) / 2.0_f32).clamp(1.5_f32, 4.0_f32);
-            let used = 18.0_f32 + 20.0_f32 + 16.0_f32 + 2.0_f32 * gap;
-            (gap, ((lane_h - used) * 0.5_f32).max(2.5_f32))
-        };
+            // 4 righe compatte: Titolo+EQ/M/S (17) + Volume (16) + Pan (13) + Bassi/Medi/Alti (18) = 64px
+            let content_h = 17.0_f32 + 16.0_f32 + 13.0_f32 + 18.0_f32;
+            let row_gap = ((lane_h - content_h - 6.0_f32) / 3.0_f32).clamp(1.2_f32, 4.2_f32);
+            let used = content_h + 3.0_f32 * row_gap;
+            let top_pad = ((lane_h - used) * 0.5_f32).max(2.0_f32);
 
-        let inner_w = HEADER_WIDTH - 11.0_f32 - 18.0_f32;
-        let track_tip = STEM_TOOLTIPS_IT[idx.min(3)];
+            let inner_w = HEADER_WIDTH - 10.0_f32 - 18.0_f32; // 240.0 px
+            let track_tip = STEM_TOOLTIPS_IT[idx.min(3)];
 
-        ui.add_space(top_pad);
-        ui.horizontal(|ui| {
-            ui.add_space(10.0_f32);
-            ui.vertical(|ui| {
-                ui.set_max_width(inner_w);
-                ui.spacing_mut().item_spacing = Vec2::new(4.0_f32, row_gap);
+            ui.add_space(top_pad);
+            ui.horizontal(|ui| {
+                ui.add_space(10.0_f32);
+                ui.vertical(|ui| {
+                    ui.set_max_width(inner_w);
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0_f32, row_gap);
 
-                // Riga 1: Nome traccia + pillole compatte M e S
-                ui.horizontal(|ui| {
-                    let title_w = inner_w - 58.0_f32;
-                    let (t_rect, t_resp) =
-                        ui.allocate_exact_size(Vec2::new(title_w, 18.0_f32), Sense::hover());
-                    let title_col = if is_silenced {
-                        Color32::from_rgb(132, 146, 170)
-                    } else {
-                        Color32::from_rgb(241, 245, 249)
-                    };
-                    ui.painter().text(
-                        Pos2::new(t_rect.left(), t_rect.center().y),
-                        Align2::LEFT_CENTER,
-                        title,
-                        FontId::proportional(11.6_f32),
-                        title_col,
-                    );
-                    t_resp.on_hover_text(track_tip);
-
-                    if compact_pill_toggle(
-                        ui,
-                        "M",
-                        ch.muted,
-                        Color32::from_rgb(239, 68, 68),
-                        Vec2::new(25.0_f32, 18.0_f32),
-                    )
-                    .on_hover_text("Muto: silenzia questo strumento nel mix")
-                    .clicked()
-                    {
-                        ch.muted = !ch.muted;
-                        if ch.muted {
-                            ch.solo = false;
+                    // Riga 1: Nome traccia + pillole compatte EQ, M e S (150 + 4 + 30 + 4 + 24 + 4 + 24 = 240)
+                    ui.horizontal(|ui| {
+                        let title_w = inner_w - 90.0_f32;
+                        let (t_rect, t_resp) =
+                            ui.allocate_exact_size(Vec2::new(title_w, 17.0_f32), Sense::click());
+                        let title_col = if is_silenced {
+                            Color32::from_rgb(132, 146, 170)
+                        } else {
+                            Color32::from_rgb(241, 245, 249)
+                        };
+                        ui.painter().text(
+                            Pos2::new(t_rect.left(), t_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            title,
+                            FontId::proportional(11.3_f32),
+                            title_col,
+                        );
+                        if t_resp.clicked() {
+                            focus_clicked = true;
                         }
-                        touched = true;
-                    }
+                        t_resp.on_hover_text(track_tip);
 
-                    if compact_pill_toggle(
-                        ui,
-                        "S",
-                        ch.solo,
-                        Color32::from_rgb(245, 158, 11),
-                        Vec2::new(25.0_f32, 18.0_f32),
-                    )
-                    .on_hover_text(format!(
-                        "Solo: ascolta unicamente {} isolato (Tasto rapido {})",
-                        title,
-                        idx + 1
-                    ))
-                    .clicked()
-                    {
-                        ch.solo = !ch.solo;
-                        if ch.solo {
-                            ch.muted = false;
+                        let eq_active = !ch.eq.is_flat() || focused_eq;
+                        let eq_resp = compact_pill_toggle(
+                            ui,
+                            "EQ",
+                            eq_active,
+                            accent,
+                            Vec2::new(30.0_f32, 17.0_f32),
+                        )
+                        .on_hover_text(
+                            "Apri la Curva EQ 3-Bande e le Manopole Bassi / Medi / Alti nel pannello inferiore\n\
+                             • Tasto destro sul pulsante EQ per riportare Bassi, Medi e Alti a 0.0 dB",
+                        );
+                        if eq_resp.secondary_clicked() {
+                            ch.eq.reset();
+                            touched = true;
+                        } else if eq_resp.clicked() {
+                            focus_clicked = true;
                         }
-                        touched = true;
-                    }
-                });
 
-                // Sottotitolo in italiano dello stem (visibile quando l'altezza lo consente)
-                if show_subtitle {
-                    let (sub_rect, sub_resp) =
-                        ui.allocate_exact_size(Vec2::new(inner_w, 11.0_f32), Sense::hover());
-                    ui.painter().text(
-                        Pos2::new(sub_rect.left(), sub_rect.center().y),
-                        Align2::LEFT_CENTER,
-                        STEM_SUBTITLES_IT[idx.min(3)],
-                        FontId::proportional(9.8_f32),
-                        Color32::from_rgb(104, 119, 145),
-                    );
-                    sub_resp.on_hover_text(track_tip);
-                }
+                        if compact_pill_toggle(
+                            ui,
+                            "M",
+                            ch.muted,
+                            Color32::from_rgb(239, 68, 68),
+                            Vec2::new(24.0_f32, 17.0_f32),
+                        )
+                        .on_hover_text("Muto: silenzia questo strumento nel mix")
+                        .clicked()
+                        {
+                            ch.muted = !ch.muted;
+                            if ch.muted {
+                                ch.solo = false;
+                            }
+                            touched = true;
+                        }
 
-                // Riga 2: Fader Volume (-24 .. +8 dB) + etichetta dB (doppio clic -> 0.0 dB)
-                let vol_row = ui.horizontal(|ui| {
-                    let fader_col = if is_silenced {
-                        Color32::from_rgb(100, 116, 139)
-                    } else {
-                        accent
-                    };
-                    let fader_min = ui.cursor().min;
-                    if sleek_progress_or_fader(
-                        ui,
-                        &mut ch.gain_db,
-                        -24.0_f32,
-                        8.0_f32,
-                        fader_col,
-                        120.0_f32,
-                        20.0_f32,
-                    ) {
-                        touched = true;
-                    }
-                    let fader_rect = Rect::from_min_size(fader_min, Vec2::new(120.0_f32, 20.0_f32));
-                    if ui.rect_contains_pointer(fader_rect)
-                        && ui.input(|i| i.pointer.button_double_clicked(PointerButton::Primary))
-                    {
-                        ch.gain_db = 0.0_f32;
-                        touched = true;
+                        if compact_pill_toggle(
+                            ui,
+                            "S",
+                            ch.solo,
+                            Color32::from_rgb(245, 158, 11),
+                            Vec2::new(24.0_f32, 17.0_f32),
+                        )
+                        .on_hover_text(format!(
+                            "Solo: ascolta unicamente {} isolato (Tasto rapido {})",
+                            title,
+                            idx + 1
+                        ))
+                        .clicked()
+                        {
+                            ch.solo = !ch.solo;
+                            if ch.solo {
+                                ch.muted = false;
+                            }
+                            touched = true;
+                        }
+                    });
+
+                    // Riga 2: Fader Volume (-24 .. +8 dB) + etichetta dB (178 + 4 + 58 = 240)
+                    let vol_row = ui.horizontal(|ui| {
+                        let fader_col = if is_silenced {
+                            Color32::from_rgb(100, 116, 139)
+                        } else {
+                            accent
+                        };
+                        let fader_min = ui.cursor().min;
+                        if sleek_progress_or_fader(
+                            ui,
+                            &mut ch.gain_db,
+                            -24.0_f32,
+                            8.0_f32,
+                            fader_col,
+                            178.0_f32,
+                            16.0_f32,
+                        ) {
+                            touched = true;
+                        }
+                        let fader_rect =
+                            Rect::from_min_size(fader_min, Vec2::new(178.0_f32, 16.0_f32));
+                        if ui.rect_contains_pointer(fader_rect)
+                            && ui.input(|i| i.pointer.button_double_clicked(PointerButton::Primary))
+                        {
+                            ch.gain_db = 0.0_f32;
+                            touched = true;
+                        }
+
+                        let (db_rect, db_resp) =
+                            ui.allocate_exact_size(Vec2::new(58.0_f32, 16.0_f32), Sense::click());
+                        if db_resp.double_clicked() {
+                            ch.gain_db = 0.0_f32;
+                            touched = true;
+                        }
+                        ui.painter().text(
+                            Pos2::new(db_rect.right(), db_rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            format!("{:+.1} dB", ch.gain_db),
+                            FontId::monospace(10.2_f32),
+                            Color32::from_rgb(191, 203, 222),
+                        );
+                        db_resp.on_hover_text("Doppio clic per riportare il volume a 0.0 dB");
+                    });
+                    if !ui.ctx().is_using_pointer() {
+                        vol_row.response.on_hover_text(
+                            "Volume Strumento (-24 .. +8 dB)\n\
+                             • Trascina per alzare o abbassare il volume\n\
+                             • Doppio clic per riportare esattamente a 0.0 dB",
+                        );
                     }
 
-                    let (db_rect, db_resp) =
-                        ui.allocate_exact_size(Vec2::new(58.0_f32, 20.0_f32), Sense::click());
-                    if db_resp.double_clicked() {
-                        ch.gain_db = 0.0_f32;
-                        touched = true;
-                    }
-                    ui.painter().text(
-                        Pos2::new(db_rect.right(), db_rect.center().y),
-                        Align2::RIGHT_CENTER,
-                        format!("{:+.1} dB", ch.gain_db),
-                        FontId::monospace(10.5_f32),
-                        Color32::from_rgb(191, 203, 222),
-                    );
-                    db_resp.on_hover_text("Doppio clic per riportare il volume a 0.0 dB");
-                });
-                if !ui.ctx().is_using_pointer() {
-                    vol_row.response.on_hover_text(
-                        "Volume Strumento (-24 .. +8 dB)\n\
-                         • Trascina per alzare o abbassare il volume\n\
-                         • Doppio clic per riportare esattamente a 0.0 dB",
-                    );
-                }
+                    // Riga 3: Mini controllo Pan bipolare (L .. R) + etichetta Pan (178 + 4 + 58 = 240)
+                    ui.horizontal(|ui| {
+                        let pan_col = if is_silenced {
+                            Color32::from_rgb(100, 116, 139)
+                        } else {
+                            accent
+                        };
+                        if sleek_bipolar_pan(
+                            ui,
+                            &mut ch.pan,
+                            pan_col,
+                            178.0_f32,
+                            13.0_f32,
+                            "Panoramica Stereo Sinistra / Destra (L / R)\n\
+                             • Trascina per posizionare lo strumento nello spazio stereo\n\
+                             • Doppio clic per riportare al Centro (PAN C)",
+                        ) {
+                            touched = true;
+                        }
 
-                // Riga 3: Mini controllo Pan bipolare (L .. R) + etichetta Pan
-                ui.horizontal(|ui| {
-                    let pan_col = if is_silenced {
-                        Color32::from_rgb(100, 116, 139)
-                    } else {
-                        accent
-                    };
-                    if sleek_bipolar_pan(
-                        ui,
-                        &mut ch.pan,
-                        pan_col,
-                        120.0_f32,
-                        16.0_f32,
-                        "Panoramica Stereo Sinistra / Destra (L / R)\n\
-                         • Trascina per posizionare lo strumento nello spazio stereo\n\
-                         • Doppio clic per riportare al Centro (PAN C)",
-                    ) {
-                        touched = true;
-                    }
+                        let pan_txt = format_pan_label(ch.pan);
+                        let (p_rect, p_resp) =
+                            ui.allocate_exact_size(Vec2::new(58.0_f32, 13.0_f32), Sense::click());
+                        if p_resp.double_clicked() {
+                            ch.pan = 0.0_f32;
+                            touched = true;
+                        }
+                        ui.painter().text(
+                            Pos2::new(p_rect.right(), p_rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            pan_txt,
+                            FontId::monospace(9.8_f32),
+                            Color32::from_rgb(148, 163, 184),
+                        );
+                        p_resp.on_hover_text("Doppio clic per centrare il Pan (PAN C)");
+                    });
 
-                    let pan_txt = format_pan_label(ch.pan);
-                    let (p_rect, p_resp) =
-                        ui.allocate_exact_size(Vec2::new(58.0_f32, 16.0_f32), Sense::click());
-                    if p_resp.double_clicked() {
-                        ch.pan = 0.0_f32;
-                        touched = true;
-                    }
-                    ui.painter().text(
-                        Pos2::new(p_rect.right(), p_rect.center().y),
-                        Align2::RIGHT_CENTER,
-                        pan_txt,
-                        FontId::monospace(10.0_f32),
-                        Color32::from_rgb(148, 163, 184),
-                    );
-                    p_resp.on_hover_text("Doppio clic per centrare il Pan (PAN C)");
+                    // Riga 4: Equalizzatore 3-Bande per Traccia Isolata — Bassi | Medi | Alti (77 + 4 + 78 + 4 + 77 = 240)
+                    ui.horizontal(|ui| {
+                        let tip_low = stem_eq_band_tooltip_it(idx, 0);
+                        let tip_mid = stem_eq_band_tooltip_it(idx, 1);
+                        let tip_high = stem_eq_band_tooltip_it(idx, 2);
+
+                        let (c0, f0) = draw_stem_eq_mini_band(
+                            ui,
+                            "Bassi",
+                            &mut ch.eq.low_db,
+                            accent,
+                            is_silenced,
+                            77.0_f32,
+                            18.0_f32,
+                            &tip_low,
+                        );
+                        let (c1, f1) = draw_stem_eq_mini_band(
+                            ui,
+                            "Medi",
+                            &mut ch.eq.mid_db,
+                            accent,
+                            is_silenced,
+                            78.0_f32,
+                            18.0_f32,
+                            &tip_mid,
+                        );
+                        let (c2, f2) = draw_stem_eq_mini_band(
+                            ui,
+                            "Alti",
+                            &mut ch.eq.high_db,
+                            accent,
+                            is_silenced,
+                            77.0_f32,
+                            18.0_f32,
+                            &tip_high,
+                        );
+                        if c0 || c1 || c2 {
+                            touched = true;
+                        }
+                        if f0 || f1 || f2 {
+                            focus_clicked = true;
+                        }
+                    });
                 });
             });
-        });
-    });
+        },
+    );
 
-    touched
+    (touched, focus_clicked)
 }
 
 /// Intestazione sinistra per la Traccia Stereo Principale (`state.stems.is_none()`).
@@ -1593,8 +1840,11 @@ fn draw_main_stereo_header(
     stereo_width: &mut f64,
     params_dirty: &mut bool,
 ) {
-    ui.allocate_ui(Vec2::new(HEADER_WIDTH, lane_h), |ui| {
-        ui.set_min_size(Vec2::new(HEADER_WIDTH, lane_h));
+    ui.allocate_ui_with_layout(
+        Vec2::new(HEADER_WIDTH, lane_h),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_min_size(Vec2::new(HEADER_WIDTH, lane_h));
         ui.set_max_size(Vec2::new(HEADER_WIDTH, lane_h));
         ui.spacing_mut().item_spacing = Vec2::new(4.0_f32, 0.0_f32);
 
@@ -1722,13 +1972,13 @@ fn draw_main_stereo_header(
                         -6.0_f32,
                         12.0_f32,
                         accent,
-                        114.0_f32,
+                        170.0_f32,
                         20.0_f32,
                     ) {
                         *comp_drive_db = drive_f32 as f64;
                         *params_dirty = true;
                     }
-                    let fader_rect = Rect::from_min_size(fader_min, Vec2::new(114.0_f32, 20.0_f32));
+                    let fader_rect = Rect::from_min_size(fader_min, Vec2::new(170.0_f32, 20.0_f32));
                     if ui.rect_contains_pointer(fader_rect)
                         && ui.input(|i| i.pointer.button_double_clicked(PointerButton::Primary))
                     {
@@ -1763,7 +2013,7 @@ fn draw_main_stereo_header(
                         ui,
                         &mut width_norm,
                         accent,
-                        114.0_f32,
+                        170.0_f32,
                         18.0_f32,
                         "Ampiezza Immagine Stereo (0% Mono .. 200% Ampio)\n• Doppio clic per ripristinare 122%",
                     ) {
@@ -2170,7 +2420,7 @@ fn sleek_bipolar_pan(
     tooltip: &str,
 ) -> bool {
     let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(width.max(40.0_f32), height.max(15.0_f32)),
+        Vec2::new(width.max(40.0_f32), height.max(12.5_f32)),
         Sense::click_and_drag(),
     );
     let mut changed = false;
