@@ -413,6 +413,7 @@ impl AiPipelineController {
                 .env("PYTHONIOENCODING", "utf-8")
                 .env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
                 .env("TORCH_BLAS_PREFER_HIPBLASLT", "0")
+                .env("PYTORCH_ENABLE_MPS_FALLBACK", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -434,6 +435,11 @@ impl AiPipelineController {
                 Ok(c) => c,
                 Err(err) => {
                     if gen_arc.load(Ordering::SeqCst) == my_gen {
+                        #[cfg(target_os = "macos")]
+                        let msg = format!(
+                            "Impossibile avviare Python AI ({err}). Esegui 'Attiva Motore AI (Apple M1).command' dal DMG."
+                        );
+                        #[cfg(not(target_os = "macos"))]
                         let msg = format!("Impossibile avviare Python AI: {err}");
                         if let Ok(mut st) = state_arc.lock() {
                             st.outcome = RunOutcome::Failed(msg.clone());
@@ -583,10 +589,22 @@ impl AiPipelineController {
                             .code()
                             .map(|c| format!("codice {c}"))
                             .unwrap_or_else(|| "terminato".to_string());
-                        let reason = st
+                        let base_reason = st
                             .last_error_line
                             .clone()
                             .unwrap_or_else(|| format!("Processo AI terminato ({code_txt})"));
+                        #[cfg(target_os = "macos")]
+                        let reason = if base_reason.contains("ModuleNotFoundError")
+                            || base_reason.contains("No module named")
+                        {
+                            format!(
+                                "{base_reason} — Apri 'Attiva Motore AI (Apple M1).command' nel DMG per completare il setup AI."
+                            )
+                        } else {
+                            base_reason
+                        };
+                        #[cfg(not(target_os = "macos"))]
+                        let reason = base_reason;
                         st.outcome = RunOutcome::Failed(reason.clone());
                         st.detail = reason.clone();
                         st.finished_elapsed_secs = Some(st.elapsed_secs());
@@ -661,6 +679,13 @@ fn candidate_search_roots() -> Vec<PathBuf> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // Supporto nativo macOS App Bundle (`StudioEQ Master Pro.app/Contents/MacOS` -> `Contents/Resources`)
+            if let Some(contents_dir) = dir.parent() {
+                let mac_resources = contents_dir.join("Resources");
+                if mac_resources.is_dir() {
+                    roots.push(mac_resources);
+                }
+            }
             push_ancestors(dir.to_path_buf(), &mut roots);
         }
     }
@@ -677,14 +702,49 @@ fn is_windows_store_stub(path: &Path) -> bool {
 }
 
 fn resolve_python_executable() -> PathBuf {
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        let home_dir = PathBuf::from(&home);
+        let mac_venv_candidates = [
+            home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("StudioEQ_Master_Pro")
+                .join(".venv")
+                .join("bin")
+                .join("python3"),
+            home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("StudioEQ_Master_Pro")
+                .join(".venv")
+                .join("bin")
+                .join("python"),
+            home_dir.join(".studioeq_venv").join("bin").join("python3"),
+        ];
+        for cand in mac_venv_candidates {
+            if cand.exists() {
+                return cand;
+            }
+        }
+    }
+
     for root in candidate_search_roots() {
         #[cfg(target_os = "windows")]
-        let venv_py = root.join(".venv").join("Scripts").join("python.exe");
+        {
+            let venv_py = root.join(".venv").join("Scripts").join("python.exe");
+            if venv_py.exists() && !is_windows_store_stub(&venv_py) {
+                return venv_py;
+            }
+        }
         #[cfg(not(target_os = "windows"))]
-        let venv_py = root.join(".venv").join("bin").join("python");
-
-        if venv_py.exists() && !is_windows_store_stub(&venv_py) {
-            return venv_py;
+        {
+            for bin_name in ["python3", "python"] {
+                let venv_py = root.join(".venv").join("bin").join(bin_name);
+                if venv_py.exists() && !is_windows_store_stub(&venv_py) {
+                    return venv_py;
+                }
+            }
         }
     }
 
@@ -722,6 +782,22 @@ fn resolve_python_executable() -> PathBuf {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
+    {
+        for sys_py in [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+        ] {
+            let p = PathBuf::from(sys_py);
+            if p.exists() {
+                return p;
+            }
+        }
+        return PathBuf::from("python3");
+    }
+
+    #[cfg(target_os = "windows")]
     PathBuf::from("python")
 }
 
@@ -748,6 +824,25 @@ fn build_enriched_path(py_exe: &Path) -> String {
             .join("Links");
         if winget_links.exists() {
             dirs.push(winget_links);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let app_support_bin = PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("StudioEQ_Master_Pro")
+                .join("bin");
+            if app_support_bin.is_dir() {
+                dirs.push(app_support_bin);
+            }
+        }
+        for mac_bin in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let p = PathBuf::from(mac_bin);
+            if p.is_dir() {
+                dirs.push(p);
+            }
         }
     }
     let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
@@ -946,6 +1041,19 @@ fn normalize_gpu_badge(raw_gpu: &str, is_cuda_hint: bool) -> (String, bool) {
             }
         } else {
             (format!("CUDA • {trimmed}"), true)
+        }
+    } else if upper.contains("MPS") || upper.contains("METAL") || upper.contains("APPLE") {
+        let cleaned = trimmed
+            .replace("(Metal MPS)", "")
+            .replace("(MPS)", "")
+            .trim()
+            .to_string();
+        if upper.starts_with("METAL") {
+            (trimmed.to_string(), true)
+        } else if cleaned.is_empty() {
+            ("Metal MPS • Apple Silicon GPU".to_string(), true)
+        } else {
+            (format!("Metal MPS • {cleaned}"), true)
         }
     } else {
         (trimmed.to_string(), false)
@@ -2681,6 +2789,13 @@ mod tests {
 
         let (rocm_lbl, rocm_on) = normalize_gpu_badge("AMD Radeon RX 7900 XT", false);
         assert!(rocm_on && rocm_lbl.starts_with("ROCm •"));
+
+        let (mps_lbl, mps_on) = normalize_gpu_badge("Apple M1 (Metal MPS)", false);
+        assert!(mps_on && mps_lbl == "Metal MPS • Apple M1");
+
+        let (cpu_m1_lbl, cpu_m1_on) =
+            normalize_gpu_badge("CPU Multi-Core Apple Silicon (8 Threads)", false);
+        assert!(!cpu_m1_on && cpu_m1_lbl.starts_with("CPU"));
 
         let (cpu_lbl, cpu_on) = normalize_gpu_badge("CPU - 16 Threads", false);
         assert!(!cpu_on && cpu_lbl.starts_with("CPU •"));

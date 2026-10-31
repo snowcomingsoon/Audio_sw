@@ -1579,7 +1579,8 @@ def generate_all_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR, for
       - Studio Toms RR1 + RR2 (`high`, `mid`, `floor`)
     """
     samples_dir = os.path.abspath(samples_dir)
-    os.makedirs(samples_dir, exist_ok=True)
+    if not os.path.isdir(samples_dir):
+        os.makedirs(samples_dir, exist_ok=True)
 
     missing_targets: list[tuple[str, str, int, str]] = []
     for rr_idx, table in ((1, STUDIO_SAMPLE_FILES), (2, STUDIO_SAMPLE_FILES_RR2)):
@@ -1638,6 +1639,12 @@ def ensure_studio_drum_samples(samples_dir: str = DEFAULT_SAMPLES_DIR) -> dict:
     if not samples_dir:
         samples_dir = DEFAULT_SAMPLES_DIR
     samples_dir = os.path.abspath(samples_dir)
+    if ".app/Contents" in samples_dir:
+        test_probe = os.path.join(samples_dir, "kick_studio_hard.wav")
+        if not _is_valid_wav_file(test_probe):
+            samples_dir = os.path.expanduser(
+                "~/Library/Application Support/StudioEQ_Master_Pro/drum_samples"
+            )
     generated = generate_all_studio_drum_samples(samples_dir=samples_dir, force=False)
 
     kick_paths = {

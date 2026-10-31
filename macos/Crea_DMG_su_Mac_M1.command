@@ -44,7 +44,7 @@ fi
 
 bash "${SCRIPT_DIR}/build_macos_m1_dmg.sh"
 
-DMG_FILE="${REPO_ROOT}/StudioEQ_Master_Pro_macOS_M1_arm64.dmg"
+DMG_FILE="${REPO_ROOT}/StudioEQ_Master_Pro_v3.1.0_macOS_M1_arm64.dmg"
 if [ -f "${DMG_FILE}" ] && command -v open >/dev/null 2>&1; then
     echo ""
     echo "Apertura del Finder con il file DMG evidenziato..."

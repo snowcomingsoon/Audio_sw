@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 from typing import Callable
 
 import numpy as np
@@ -40,6 +41,7 @@ import torch
 import torch.nn as nn
 
 os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "0")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 try:
     from .apollo_restorer import restore_codec_apollo
@@ -130,8 +132,21 @@ def _patch_lstm_for_rocm_rdna4(model: nn.Module) -> None:
             mod._rdna4_cpu_wrapped = True  # type: ignore[attr-defined]
 
 
-def _get_drumsep_model(ckpt_path: str | None = None) -> tuple[object, torch.device] | None:
+def _resolve_drumsep_ckpt_path(ckpt_path: str | None = None) -> str:
     target = ckpt_path or DRUMSEP_DEFAULT_CKPT
+    if os.path.isfile(target):
+        return target
+    if ".app/Contents" in target or (
+        sys.platform == "darwin" and not os.access(os.path.dirname(os.path.dirname(target)), os.W_OK)
+    ):
+        return os.path.expanduser(
+            "~/Library/Application Support/StudioEQ_Master_Pro/models/drumsep/49469ca8.th"
+        )
+    return target
+
+
+def _get_drumsep_model(ckpt_path: str | None = None) -> tuple[object, torch.device] | None:
+    target = _resolve_drumsep_ckpt_path(ckpt_path)
     if target in _DRUMSEP_MODEL_CACHE:
         return _DRUMSEP_MODEL_CACHE[target]
 

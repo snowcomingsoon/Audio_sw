@@ -22,6 +22,7 @@ os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 os.environ.setdefault("HF_HUB_VERBOSITY", "error")
 os.environ.setdefault("TQDM_MININTERVAL", "0.15")
 os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "0")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import argparse
 import hashlib
@@ -147,7 +148,21 @@ def _select_compute_backend() -> tuple[object, str, bool]:
         return torch.device("cuda"), dev_name, False
 
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps"), "Apple Silicon GPU (Metal MPS)", False
+        apple_chip = "Apple Silicon GPU"
+        if sys.platform == "darwin":
+            try:
+                chip_out = subprocess.run(
+                    ["sysctl", "-n", "machdep.cpu.brand_string"],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                ).stdout.strip()
+                if chip_out:
+                    apple_chip = chip_out
+            except Exception:
+                pass
+        return torch.device("mps"), f"{apple_chip} (Metal MPS)", False
 
     if _HAS_DIRECTML and torch_directml is not None:
         try:
@@ -212,11 +227,25 @@ def _resolve_ffmpeg_bin() -> str:
 
     # Installazione autonoma: usa prima FFmpeg incluso accanto all'app.
     bundled_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg", "bin")
-    bundled_ffmpeg = os.path.join(bundled_bin, "ffmpeg.exe")
+    bundled_exe_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    bundled_ffmpeg = os.path.join(bundled_bin, bundled_exe_name)
     if os.path.isfile(bundled_ffmpeg):
         os.environ["PATH"] = bundled_bin + os.pathsep + os.environ.get("PATH", "")
         _CACHED_FFMPEG_BIN = bundled_ffmpeg
         return bundled_ffmpeg
+
+    if sys.platform == "darwin":
+        mac_candidates = [
+            os.path.expanduser("~/Library/Application Support/StudioEQ_Master_Pro/bin/ffmpeg"),
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+        ]
+        for mc in mac_candidates:
+            if os.path.isfile(mc):
+                mc_dir = os.path.dirname(mc)
+                os.environ["PATH"] = mc_dir + os.pathsep + os.environ.get("PATH", "")
+                _CACHED_FFMPEG_BIN = mc
+                return mc
 
     if os.name == "nt":
         local_app = os.environ.get("LOCALAPPDATA", "")
@@ -235,7 +264,21 @@ def _resolve_ffmpeg_bin() -> str:
                         return m
 
     found = shutil.which("ffmpeg")
-    _CACHED_FFMPEG_BIN = found if found else "ffmpeg"
+    if found:
+        _CACHED_FFMPEG_BIN = found
+        return _CACHED_FFMPEG_BIN
+
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        iio_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        if iio_bin and os.path.isfile(iio_bin):
+            _CACHED_FFMPEG_BIN = iio_bin
+            return _CACHED_FFMPEG_BIN
+    except Exception:
+        pass
+
+    _CACHED_FFMPEG_BIN = "ffmpeg"
     return _CACHED_FFMPEG_BIN
 
 
@@ -403,6 +446,44 @@ def separate_with_demucs(audio_2xN: np.ndarray, model_name: str = "htdemucs_ft")
             )
             device = torch.device("cpu")
             torch.set_num_threads(_CPU_THREADS)
+            model.to(device)
+            with torch.no_grad():
+                sources = apply_model(
+                    model,
+                    wav_norm[None],
+                    device=device,
+                    shifts=1,
+                    split=True,
+                    overlap=0.25,
+                    progress=True,
+                )[0]
+    elif getattr(device, "type", "") == "mps":
+        # Su Apple Silicon M1/M2/M3/M4 (`mps`), offload di `_spectro`/`_ispectro` (STFT complex64)
+        # sulla CPU AMX mantenendo tutti i pesanti blocchi Conv2d/Transformer sulla GPU Metal MPS!
+        saved_mps_hooks: list[tuple[object, object, object]] = []
+        try:
+            saved_mps_hooks = _patch_htdemucs_spectro_for_directml(model, device)
+            model.to(device)
+            with torch.no_grad():
+                sources = apply_model(
+                    model,
+                    wav_norm[None].to(device),
+                    device=device,
+                    shifts=1,
+                    split=True,
+                    overlap=0.25,
+                    progress=True,
+                )[0]
+        except Exception as mps_err:
+            _restore_htdemucs_spectro(saved_mps_hooks)
+            cpu_apple_label = f"CPU Multi-Core Apple Silicon ({_CPU_THREADS} Threads)"
+            _LAST_EFFECTIVE_GPU_LABEL = cpu_apple_label
+            gpu_label = cpu_apple_label
+            print(
+                f"[Demucs AI] Nota: fallback automatico da MPS a {cpu_apple_label} ({type(mps_err).__name__})...",
+                flush=True,
+            )
+            device = torch.device("cpu")
             model.to(device)
             with torch.no_grad():
                 sources = apply_model(

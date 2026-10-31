@@ -319,10 +319,39 @@ pub fn discover_winget_ffmpeg_dirs() -> Vec<PathBuf> {
         }
     }
 
+    #[cfg(target_os = "windows")]
     for fallback in [r"C:\ffmpeg\bin", r"C:\Program Files\ffmpeg\bin"] {
         let p = Path::new(fallback);
         if p.is_dir() {
             extra_dirs.push(p.to_path_buf());
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            let app_support_bin = PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("StudioEQ_Master_Pro")
+                .join("bin");
+            if app_support_bin.is_dir() {
+                extra_dirs.push(app_support_bin);
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(contents) = exe.parent().and_then(|p| p.parent()) {
+                let bundled_mac_ffmpeg = contents.join("Resources").join("ffmpeg").join("bin");
+                if bundled_mac_ffmpeg.is_dir() {
+                    extra_dirs.push(bundled_mac_ffmpeg);
+                }
+            }
+        }
+        for mac_dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            let p = Path::new(mac_dir);
+            if p.is_dir() {
+                extra_dirs.push(p.to_path_buf());
+            }
         }
     }
 
@@ -788,7 +817,13 @@ impl RealtimeAudioEngine {
                 |err| eprintln!("Errore stream audio: {err}"),
                 None,
             )
-            .map_err(|e| format!("Impossibile avviare lo stream audio WASAPI: {e}"))?;
+            .map_err(|e| {
+                #[cfg(target_os = "macos")]
+                let backend = "CoreAudio";
+                #[cfg(not(target_os = "macos"))]
+                let backend = "WASAPI";
+                format!("Impossibile avviare lo stream audio {backend}: {e}")
+            })?;
 
         stream
             .play()

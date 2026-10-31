@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-macos-m1-dmg:
-    name: macOS Apple Silicon M1 (arm64) App & DMG
+    name: macOS Apple Silicon M1 (arm64) App & DMG v3.1.0
     runs-on: macos-14
     steps:
       - name: Checkout Repository
@@ -27,41 +27,32 @@ jobs:
         with:
           workspaces: studio-eq-rust
 
-      - name: Build StudioEQ Master Pro.app & Native M1 DMG
+      - name: Build StudioEQ Master Pro.app & Native M1 DMG (with Unit Tests)
         run: bash macos/build_macos_m1_dmg.sh
+
+      - name: Verify Native M1 AI Setup Script & Metal MPS Environment
+        run: |
+          bash macos/setup_ai_macos_m1.sh
+          "$HOME/Library/Application Support/StudioEQ_Master_Pro/.venv/bin/python3" -c "import sys; sys.path.insert(0, 'dist/StudioEQ Master Pro.app/Contents/Resources'); import demucs_pedalboard_master as dpm; from audio_modules import drumsep_v3, apollo_restorer, bass_enhancer, vocal_autotune, time_stretch_bpm; print('GPU M1:', dpm.detect_gpu_label()); print('FFmpeg:', dpm._resolve_ffmpeg_bin())"
 
       - name: Upload macOS M1 DMG Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StudioEQ_Master_Pro_macOS_M1_arm64
-          path: StudioEQ_Master_Pro_macOS_M1_arm64.dmg
+          name: StudioEQ_Master_Pro_v3.1.0_macOS_M1_arm64
+          path: StudioEQ_Master_Pro_v3.1.0_macOS_M1_arm64.dmg
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish macOS M1 DMG to GitHub Releases
+      - name: Publish macOS M1 DMG to GitHub Release v3.1.0
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0-m1
+          tag_name: v3.1.0
           target_commitish: ${{ github.sha }}
-          name: "StudioEQ Master Pro v1.0.0 — macOS Apple Silicon (M1/M2/M3/M4)"
+          name: "StudioEQ Master Pro v3.1.0 — Windows x64 & macOS Apple Silicon (M1/M2/M3/M4)"
           draft: false
           prerelease: false
           make_latest: true
-          body: |
-            ## StudioEQ Master Pro v1.0.0 — Installer Nativo macOS Apple Silicon (`arm64` M1 / M2 / M3 / M4)
-
-            ### Download Diretto
-            Scarica **`StudioEQ_Master_Pro_macOS_M1_arm64.dmg`** nella sezione **Assets** qui sotto.
-
-            ### Installazione Rapida su Mac con Chip M1 / M2 / M3 / M4
-            1. Apri il file **`StudioEQ_Master_Pro_macOS_M1_arm64.dmg`**.
-            2. Trascina **`StudioEQ Master Pro.app`** nella cartella **`Applications`**.
-            3. **Primo avvio (Gatekeeper macOS):** poiché il pacchetto usa firma locale nativa *ad-hoc* (`arm64`) senza notarizzazione Apple Developer a pagamento, se macOS mostra un avviso di sicurezza al primo avvio apri **Terminale** ed esegui:
-               ```bash
-               xattr -cr "/Applications/StudioEQ Master Pro.app"
-               ```
-               oppure fai **Ctrl + Clic (Tasto Destro) → Apri** su `StudioEQ Master Pro.app` in `/Applications`.
           files: |
-            StudioEQ_Master_Pro_macOS_M1_arm64.dmg
+            StudioEQ_Master_Pro_v3.1.0_macOS_M1_arm64.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

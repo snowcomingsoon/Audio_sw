@@ -31,6 +31,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "0")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 APOLLO_SAMPLE_RATE = 44100
 APOLLO_HF_REPO = "JusperLee/Apollo"
@@ -325,8 +326,21 @@ def _install_omegaconf_unpickle_stub() -> None:
         sys.modules[mod_name] = mod
 
 
+def _resolve_apollo_ckpt_path(ckpt_path: str | None = None) -> str:
+    target = ckpt_path or APOLLO_DEFAULT_CKPT
+    if os.path.isfile(target):
+        return target
+    if ".app/Contents" in target or (
+        sys.platform == "darwin" and not os.access(os.path.dirname(os.path.dirname(target)), os.W_OK)
+    ):
+        return os.path.expanduser(
+            "~/Library/Application Support/StudioEQ_Master_Pro/models/apollo/pytorch_model.bin"
+        )
+    return target
+
+
 def _get_apollo_model(ckpt_path: str | None = None) -> tuple[ApolloNet, torch.device] | None:
-    target_ckpt = ckpt_path or APOLLO_DEFAULT_CKPT
+    target_ckpt = _resolve_apollo_ckpt_path(ckpt_path)
     if target_ckpt in _APOLLO_CACHE:
         return _APOLLO_CACHE[target_ckpt]
 

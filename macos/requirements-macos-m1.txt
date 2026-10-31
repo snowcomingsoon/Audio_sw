@@ -1,0 +1,20 @@
+# StudioEQ Master Pro v3.1.0 — Dipendenze AI Native macOS Apple Silicon (M1 / M2 / M3 / M4)
+# Architettura: aarch64-apple-darwin (arm64 nativo + accelerazione GPU Apple Metal MPS)
+torch>=2.4.0
+torchaudio>=2.4.0
+demucs>=4.1.0
+pedalboard>=0.9.14
+noisereduce>=3.0.2
+pyloudnorm>=0.1.1
+numpy>=1.26.4
+scipy>=1.13.1
+soundfile>=0.12.1
+librosa>=0.10.2.post1
+huggingface_hub>=0.25.0
+gdown>=5.2.0
+imageio-ffmpeg>=0.5.1
+lameenc>=1.7.0
+stftpitchshift>=1.5.1
+audiotsm>=0.1.2
+matchering>=2.0.6
+tqdm>=4.66.0

@@ -321,7 +321,12 @@ impl StudioEqApp {
         }
 
         // 1. Preferisce la cartella del progetto che contiene lo script AI o un `output/` già popolato
+        //    (escludendo bundle `.app` e volumi sola-lettura `/Volumes/` su macOS)
         for r in &roots {
+            let r_str = r.to_string_lossy();
+            if r_str.contains(".app") || r_str.starts_with("/Volumes/") || r_str == "/Applications" || r_str == "/" {
+                continue;
+            }
             let out_cand = r.join("output");
             if out_cand.exists() {
                 return out_cand;
