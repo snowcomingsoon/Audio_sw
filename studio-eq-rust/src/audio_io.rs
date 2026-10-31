@@ -329,14 +329,19 @@ pub fn discover_winget_ffmpeg_dirs() -> Vec<PathBuf> {
 
     #[cfg(not(target_os = "windows"))]
     {
+        let sys_ffmpeg = PathBuf::from("/Library/Application Support/StudioEQ_Master_Pro/ffmpeg/bin");
+        if sys_ffmpeg.is_dir() {
+            extra_dirs.push(sys_ffmpeg);
+        }
         if let Some(home) = std::env::var_os("HOME") {
-            let app_support_bin = PathBuf::from(home)
+            let home_support = PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("StudioEQ_Master_Pro")
-                .join("bin");
-            if app_support_bin.is_dir() {
-                extra_dirs.push(app_support_bin);
+                .join("StudioEQ_Master_Pro");
+            for sub in [home_support.join("ffmpeg").join("bin"), home_support.join("bin")] {
+                if sub.is_dir() {
+                    extra_dirs.push(sub);
+                }
             }
         }
         if let Ok(exe) = std::env::current_exe() {

@@ -410,6 +410,8 @@ impl AiPipelineController {
                 .arg(&cfg_path)
                 .env("PATH", enriched_path)
                 .env("PYTHONUNBUFFERED", "1")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .env("PYTHONNOUSERSITE", "1")
                 .env("PYTHONIOENCODING", "utf-8")
                 .env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
                 .env("TORCH_BLAS_PREFER_HIPBLASLT", "0")
@@ -418,10 +420,17 @@ impl AiPipelineController {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
-            // Installer standalone: il modello Demucs viene fornito nella cache locale dell'app.
+            // Installer standalone (Windows & macOS Full Setup): modelli Demucs pre-inclusi offline.
             if let Some(app_root) = script_path.parent() {
                 let bundled_hf_home = app_root.join("models");
                 if bundled_hf_home.join("hub").exists() {
+                    if bundled_hf_home
+                        .join("hub")
+                        .join("models--adefossez--HTDemucs-ft")
+                        .exists()
+                    {
+                        cmd.env("HF_HUB_OFFLINE", "1");
+                    }
                     cmd.env("HF_HOME", bundled_hf_home);
                 }
             }
@@ -703,28 +712,42 @@ fn is_windows_store_stub(path: &Path) -> bool {
 
 fn resolve_python_executable() -> PathBuf {
     #[cfg(not(target_os = "windows"))]
-    if let Ok(home) = std::env::var("HOME") {
-        let home_dir = PathBuf::from(&home);
-        let mac_venv_candidates = [
-            home_dir
-                .join("Library")
-                .join("Application Support")
-                .join("StudioEQ_Master_Pro")
-                .join(".venv")
-                .join("bin")
-                .join("python3"),
-            home_dir
-                .join("Library")
-                .join("Application Support")
-                .join("StudioEQ_Master_Pro")
-                .join(".venv")
-                .join("bin")
-                .join("python"),
-            home_dir.join(".studioeq_venv").join("bin").join("python3"),
-        ];
-        for cand in mac_venv_candidates {
-            if cand.exists() {
-                return cand;
+    {
+        let sys_standalone_py =
+            PathBuf::from("/Library/Application Support/StudioEQ_Master_Pro/python/bin/python3");
+        if sys_standalone_py.exists() {
+            return sys_standalone_py;
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let home_dir = PathBuf::from(&home);
+            let mac_venv_candidates = [
+                home_dir
+                    .join("Library")
+                    .join("Application Support")
+                    .join("StudioEQ_Master_Pro")
+                    .join("python")
+                    .join("bin")
+                    .join("python3"),
+                home_dir
+                    .join("Library")
+                    .join("Application Support")
+                    .join("StudioEQ_Master_Pro")
+                    .join(".venv")
+                    .join("bin")
+                    .join("python3"),
+                home_dir
+                    .join("Library")
+                    .join("Application Support")
+                    .join("StudioEQ_Master_Pro")
+                    .join(".venv")
+                    .join("bin")
+                    .join("python"),
+                home_dir.join(".studioeq_venv").join("bin").join("python3"),
+            ];
+            for cand in mac_venv_candidates {
+                if cand.exists() {
+                    return cand;
+                }
             }
         }
     }
@@ -802,6 +825,24 @@ fn resolve_python_executable() -> PathBuf {
 }
 
 fn resolve_pipeline_script() -> PathBuf {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let sys_bundle_root = PathBuf::from("/Library/Application Support/StudioEQ_Master_Pro");
+        let sys_script = sys_bundle_root.join("demucs_pedalboard_master.py");
+        if sys_script.exists() && sys_bundle_root.join("models").join("hub").exists() {
+            return sys_script;
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let user_bundle_root = PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("StudioEQ_Master_Pro");
+            let user_script = user_bundle_root.join("demucs_pedalboard_master.py");
+            if user_script.exists() && user_bundle_root.join("models").join("hub").exists() {
+                return user_script;
+            }
+        }
+    }
     for root in candidate_search_roots() {
         let candidate = root.join("demucs_pedalboard_master.py");
         if candidate.exists() {
@@ -828,14 +869,19 @@ fn build_enriched_path(py_exe: &Path) -> String {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let sys_ffmpeg = PathBuf::from("/Library/Application Support/StudioEQ_Master_Pro/ffmpeg/bin");
+        if sys_ffmpeg.is_dir() {
+            dirs.push(sys_ffmpeg);
+        }
         if let Ok(home) = std::env::var("HOME") {
-            let app_support_bin = PathBuf::from(home)
+            let home_support = PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("StudioEQ_Master_Pro")
-                .join("bin");
-            if app_support_bin.is_dir() {
-                dirs.push(app_support_bin);
+                .join("StudioEQ_Master_Pro");
+            for sub in [home_support.join("ffmpeg").join("bin"), home_support.join("bin")] {
+                if sub.is_dir() {
+                    dirs.push(sub);
+                }
             }
         }
         for mac_bin in ["/opt/homebrew/bin", "/usr/local/bin"] {
