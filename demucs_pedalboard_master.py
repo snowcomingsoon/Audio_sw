@@ -47,6 +47,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import numpy as np
+import scipy.signal as sig_sp
 import torch
 
 _CPU_THREADS = max(1, os.cpu_count() or 8)
@@ -526,38 +527,120 @@ def separate_with_demucs(audio_2xN: np.ndarray, model_name: str = "htdemucs_ft")
     return stems
 
 
+def _de_echo_single_chunk(v_2xN: np.ndarray, sr: int = 44100, strength: float = 0.88) -> np.ndarray:
+    """
+    Motore DSP 4-Stadi De-Echo & De-Reverb per traccia Voce isolata:
+    1. Mid/Side Stereo Echo Collapse (abbatte il ping-pong delay e il riverbero stereo largo del mixer PA)
+    2. STFT Multi-Tap Delay (60ms, 91ms, 183ms, 230ms, 335ms, 450ms) & Late-Reverb Spectral Dereverberation
+    3. Inviluppo Transiente Sillabico (attenua le code di eco tra una parola e l'altra preservando il 100% dell'attacco vocale)
+    """
+    mid = 0.5 * (v_2xN[0] + v_2xN[1])
+    side = 0.5 * (v_2xN[0] - v_2xN[1]) * (1.0 - 0.82 * strength)
+
+    nperseg = 2048
+    noverlap = 1536
+    _, _, Z = sig_sp.stft(mid, fs=sr, nperseg=nperseg, noverlap=noverlap)
+    mag2 = np.abs(Z) ** 2
+    _, n_frames = mag2.shape
+
+    rev_power = np.zeros_like(mag2)
+    alpha = 0.865
+    for t in range(3, n_frames):
+        rev_power[:, t] = alpha * rev_power[:, t - 1] + (1.0 - alpha) * mag2[:, t - 3]
+
+    tap_frames = [(5, 0.24), (8, 0.28), (16, 0.24), (20, 0.16), (29, 0.15), (39, 0.12)]
+    tap_power = np.zeros_like(mag2)
+    for lag, weight in tap_frames:
+        if n_frames > lag:
+            tap_power[:, lag:] += weight * mag2[:, :-lag]
+
+    voice_band_energy = np.mean(mag2[8:160, :], axis=0) + 1e-12
+    prev_energy = np.roll(voice_band_energy, 1)
+    prev_energy[0] = voice_band_energy[0]
+    is_attack = (voice_band_energy > prev_energy * 1.35).astype(np.float32)
+    attack_shield = 1.0 - 0.72 * is_attack[None, :]
+
+    echo_est = strength * attack_shield * (0.52 * rev_power + 0.58 * tap_power)
+    floor_gain = max(0.10, 1.0 - 0.88 * strength)
+    gain_stft = np.maximum(floor_gain, np.maximum(0.0, mag2 - echo_est) / (mag2 + 1e-12)) ** 0.62
+
+    kernel_f = np.array([0.2, 0.6, 0.2], dtype=np.float32)[:, None]
+    gain_stft = sig_sp.convolve(gain_stft, kernel_f, mode="same")
+    for t in range(1, n_frames):
+        gain_stft[:, t] = np.where(
+            gain_stft[:, t] > gain_stft[:, t - 1],
+            0.82 * gain_stft[:, t] + 0.18 * gain_stft[:, t - 1],
+            0.45 * gain_stft[:, t] + 0.55 * gain_stft[:, t - 1],
+        )
+
+    _, mid_derev = sig_sp.istft(Z * gain_stft, fs=sr, nperseg=nperseg, noverlap=noverlap)
+    mid_derev = mid_derev[: v_2xN.shape[1]].astype(np.float32)
+
+    hop_env = 256
+    n_env = len(mid_derev) // hop_env
+    if n_env > 4:
+        rms_frames = np.sqrt(np.mean(mid_derev[: n_env * hop_env].reshape(n_env, hop_env) ** 2, axis=1) + 1e-12)
+        fast_env = np.copy(rms_frames)
+        slow_env = np.copy(rms_frames)
+        for i in range(1, n_env):
+            fast_env[i] = max(rms_frames[i], 0.55 * fast_env[i - 1] + 0.45 * rms_frames[i])
+            slow_env[i] = max(rms_frames[i], 0.945 * slow_env[i - 1] + 0.055 * rms_frames[i])
+        ratio_env = np.clip(fast_env / (slow_env + 1e-7), 0.14, 1.0)
+        env_gate = np.where(ratio_env < 0.68, (ratio_env / 0.68) ** (0.85 * strength), 1.0).astype(np.float32)
+        sample_gate = np.interp(
+            np.arange(len(mid_derev), dtype=np.float32),
+            np.arange(n_env, dtype=np.float32) * hop_env,
+            env_gate,
+        ).astype(np.float32)
+        mid_derev *= sample_gate
+        side *= sample_gate
+
+    return np.stack([mid_derev + side, mid_derev - side], axis=0).astype(np.float32)
+
+
+def remove_vocal_echo_and_reverb(vocals: np.ndarray, sr: int = 44100, strength: float = 0.88) -> np.ndarray:
+    """Applica il De-Echo & De-Reverb a blocchi di 120s per memoria costante anche su file da 40+ minuti."""
+    total_len = vocals.shape[1]
+    chunk = sr * 120
+    out = np.zeros_like(vocals, dtype=np.float32)
+    for s0 in range(0, total_len, chunk):
+        s1 = min(total_len, s0 + chunk)
+        seg = vocals[:, s0:s1]
+        cleaned_seg = nr.reduce_noise(
+            y=seg,
+            sr=sr,
+            stationary=True,
+            prop_decrease=0.45,
+            n_fft=2048,
+        ).astype(np.float32)
+        out[:, s0:s1] = _de_echo_single_chunk(cleaned_seg, sr=sr, strength=strength)
+    return out
+
+
 def process_vocals_stem(vocals: np.ndarray, sr: int = 44100) -> np.ndarray:
     """
-    Catena Studio Voce (noisereduce + Spotify Pedalboard):
-    - Pulizia spettrale leggera del fruscio/rientri di sala
-    - Taglio netto sotto 115 Hz (elimina rimbombo cassa/basso dal microfono voce)
-    - Scavo effetto scatola (210 Hz e 490 Hz)
-    - Recupero corpo, intelligibilità e Aria da studio (1.65 kHz, 4.5 kHz, 8.5 kHz)
-    - Compressore vocale + velo (4%) di Plate Reverb corto per naturalezza
+    Catena Studio Voce Anti-Eco & Dry Presence (De-Echo 4-Stadi + noisereduce + Spotify Pedalboard):
+    - Rimozione chirurgica dell'eco/delay multi-tap (60-460 ms) e della coda di riverbero
+    - Taglio netto sotto 125 Hz e scavo risonanze fangose del delay (235 Hz e 485 Hz)
+    - Soppressione slap aspro del delay a 2450 Hz e presenza vocale asciutta in primo piano (1.65 kHz, 4.6 kHz)
+    - ZERO riverbero aggiunto (voce asciutta, intima e ferma al centro del mix)
     """
-    print("[Stem 1/4 - VOCE] Spectral De-Noise (noisereduce) + Pedalboard Vocal Strip...", flush=True)
-    cleaned = nr.reduce_noise(
-        y=vocals,
-        sr=sr,
-        stationary=True,
-        prop_decrease=0.42,
-        n_fft=2048,
-    ).astype(np.float32)
+    print("[Stem 1/4 - VOCE] De-Echo & De-Reverb Spettrale Multi-Tap + Dry Vocal Strip...", flush=True)
+    de_echoed = remove_vocal_echo_and_reverb(vocals, sr=sr, strength=0.88)
 
     board = Pedalboard([
-        NoiseGate(threshold_db=-44.0, ratio=2.2, attack_ms=4.0, release_ms=180.0),
-        HighpassFilter(cutoff_frequency_hz=115.0),
-        PeakFilter(cutoff_frequency_hz=210.0, gain_db=-3.5, q=1.6),
-        PeakFilter(cutoff_frequency_hz=490.0, gain_db=-4.6, q=2.1),
-        PeakFilter(cutoff_frequency_hz=1650.0, gain_db=4.0, q=0.9),
-        PeakFilter(cutoff_frequency_hz=2350.0, gain_db=-2.2, q=3.2),
-        PeakFilter(cutoff_frequency_hz=4500.0, gain_db=4.4, q=1.0),
-        HighShelfFilter(cutoff_frequency_hz=8500.0, gain_db=5.8, q=0.707),
-        Compressor(threshold_db=-22.0, ratio=3.2, attack_ms=12.0, release_ms=110.0),
-        Reverb(room_size=0.24, damping=0.70, wet_level=0.04, dry_level=0.98, width=0.75),
-        Gain(gain_db=1.0),
+        NoiseGate(threshold_db=-37.0, ratio=3.0, attack_ms=3.0, release_ms=145.0),
+        HighpassFilter(cutoff_frequency_hz=125.0),
+        PeakFilter(cutoff_frequency_hz=235.0, gain_db=-4.5, q=1.7),
+        PeakFilter(cutoff_frequency_hz=485.0, gain_db=-5.2, q=2.2),
+        PeakFilter(cutoff_frequency_hz=1650.0, gain_db=4.2, q=0.95),
+        PeakFilter(cutoff_frequency_hz=2450.0, gain_db=-3.2, q=3.4),
+        PeakFilter(cutoff_frequency_hz=4600.0, gain_db=4.5, q=1.0),
+        HighShelfFilter(cutoff_frequency_hz=8800.0, gain_db=4.8, q=0.707),
+        Compressor(threshold_db=-21.5, ratio=3.4, attack_ms=10.0, release_ms=95.0),
+        Gain(gain_db=1.8),
     ])
-    return board(cleaned, sr)
+    return board(de_echoed, sr)
 
 
 def process_drums_stem(drums: np.ndarray, sr: int = 44100, drum_mode: str = "off") -> np.ndarray:
